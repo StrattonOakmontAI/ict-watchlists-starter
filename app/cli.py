@@ -107,6 +107,43 @@ async def scheduler(startup_log="Starting PT scheduler..."):
     print("Scheduler started (PT). Waiting for triggers...")
     while True:
         await asyncio.sleep(3600)
+# === MVP WATCHLIST GENERATORS (copy-paste block) ============================
+# This overrides the earlier demo functions with the real Polygon-powered ones.
+# Paste this ABOVE the `if __name__ == "__main__":` line.
+
+# Import safely so you don't have to edit the top of the file
+try:
+    from app.watchlist import post_watchlist
+except Exception as e:
+    post_watchlist = None
+    print("WARNING: post_watchlist not available:", e)
+
+# Re-define the three scheduled jobs to call the real generator.
+# They keep your existing 5-minute dedupe via should_run(..)
+async def weekly():
+    if post_watchlist is None:
+        print("post_watchlist missing; using demo weekly()")
+        return
+    if not should_run("weekly", 5):
+        return
+    await post_watchlist("weekly")
+
+async def premarket():
+    if post_watchlist is None:
+        print("post_watchlist missing; using demo premarket()")
+        return
+    if not should_run("premarket", 5):
+        return
+    await post_watchlist("premarket")
+
+async def evening():
+    if post_watchlist is None:
+        print("post_watchlist missing; using demo evening()")
+        return
+    if not should_run("evening", 5):
+        return
+    await post_watchlist("evening")
+# === END MVP WATCHLIST GENERATORS ==========================================
 
 if __name__ == "__main__":
     p = argparse.ArgumentParser()
