@@ -6,7 +6,7 @@ from apscheduler.triggers.cron import CronTrigger
 
 from app.notify import send_watchlist, send_entry
 
-PT = pytz.timezone("America/Los_Angeles")
+PT = pytz.timezone("America/Los_Angeles")  # <-- local time with DST handled
 UTC = pytz.utc
 
 # --- simple duplicate guard (persists across restarts in container) ---
@@ -73,7 +73,7 @@ async def evening():
 async def test_watchlist():
     await premarket()
 
-async def test_watchlist_force():   # <-- BYPASSES DEDUPE
+async def test_watchlist_force():   # bypasses dedupe for instant testing
     await send_watchlist(
         f"Pre-Market Watchlist (FORCE) – {now_pt_str()}",
         ["SPY – demo", "TSLA – demo"]
@@ -85,23 +85,26 @@ async def test_entry():
 # ----- keep-alive loop -----
 async def idle():
     """
-    IMPORTANT: idle also starts the scheduler so even if DO's run command is 'idle',
-    schedules still run.
+    idle also starts the scheduler so even if DO's run command is 'idle',
+    schedules still run in Pacific Time.
     """
-    await scheduler(startup_log="Idle worker: starting internal scheduler...")
+    await scheduler(startup_log="Idle worker: starting PT scheduler...")
     while True:
         await asyncio.sleep(3600)
 
-# ----- internal scheduler -----
-async def scheduler(startup_log="Starting internal scheduler..."):
+# ----- internal scheduler in Pacific Time (handles PST/PDT automatically) -----
+async def scheduler(startup_log="Starting PT scheduler..."):
     print(startup_log)
-    sched = AsyncIOScheduler(timezone=UTC)
-    # PDT mapping (Oct): PT 06:00 -> 13:00 UTC, PT 17:30 -> 00:30 UTC, Sun 08:00 -> 15:00 UTC
-    sched.add_job(premarket, CronTrigger(hour=13, minute=0))                     # daily 13:00 UTC
-    sched.add_job(evening,   CronTrigger(hour=0,  minute=30))                    # daily 00:30 UTC
-    sched.add_job(weekly,    CronTrigger(day_of_week='sun', hour=15, minute=0))  # Sunday 15:00 UTC
+    sched = AsyncIOScheduler(timezone=PT)  # <-- schedule in PT, not UTC
+    # Always run at these LOCAL times in Los Angeles:
+    #  - Daily pre-market: 06:00 PT
+    #  - Daily evening:    17:30 PT
+    #  - Weekly Sunday:    08:00 PT
+    sched.add_job(premarket, CronTrigger(hour=6,  minute=0))                     # daily 6:00 AM PT
+    sched.add_job(evening,   CronTrigger(hour=17, minute=30))                    # daily 5:30 PM PT
+    sched.add_job(weekly,    CronTrigger(day_of_week='sun', hour=8, minute=0))   # Sunday 8:00 AM PT
     sched.start()
-    print("Scheduler started. Waiting for triggers...")
+    print("Scheduler started (PT). Waiting for triggers...")
     while True:
         await asyncio.sleep(3600)
 
