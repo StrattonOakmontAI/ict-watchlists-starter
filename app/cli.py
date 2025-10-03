@@ -35,7 +35,6 @@ def should_run(job: str, min_minutes: int = 10) -> bool:
     if last:
         last_dt = datetime.fromisoformat(last)
         if _now_utc() - last_dt < timedelta(minutes=min_minutes):
-            # too soon; probable duplicate trigger
             return False
     data[job] = _now_utc().isoformat()
     _save_last(data)
@@ -47,7 +46,7 @@ def now_pt_str():
 
 # ----- job bodies -----
 async def weekly():
-    if not should_run("weekly", 5):  # 5-minute dedupe window
+    if not should_run("weekly", 5):
         return
     await send_watchlist(
         f"Weekly Watchlist (Sun 08:00 PT) – {now_pt_str()}",
@@ -70,9 +69,15 @@ async def evening():
         ["NVDA – demo", "AMZN – demo"]
     )
 
-# quick manual tests
+# quick manual tests (aliases)
 async def test_watchlist():
     await premarket()
+
+async def test_watchlist_force():   # <-- BYPASSES DEDUPE
+    await send_watchlist(
+        f"Pre-Market Watchlist (FORCE) – {now_pt_str()}",
+        ["SPY – demo", "TSLA – demo"]
+    )
 
 async def test_entry():
     await send_entry("AAPL")
@@ -80,11 +85,10 @@ async def test_entry():
 # ----- keep-alive loop -----
 async def idle():
     """
-    IMPORTANT: We also start the scheduler from here so even if
-    the DO run command is 'idle', schedules still run.
+    IMPORTANT: idle also starts the scheduler so even if DO's run command is 'idle',
+    schedules still run.
     """
     await scheduler(startup_log="Idle worker: starting internal scheduler...")
-    # If scheduler returns, keep the container alive
     while True:
         await asyncio.sleep(3600)
 
@@ -98,7 +102,6 @@ async def scheduler(startup_log="Starting internal scheduler..."):
     sched.add_job(weekly,    CronTrigger(day_of_week='sun', hour=15, minute=0))  # Sunday 15:00 UTC
     sched.start()
     print("Scheduler started. Waiting for triggers...")
-    # Don't exit; keep loop running
     while True:
         await asyncio.sleep(3600)
 
@@ -107,8 +110,12 @@ if __name__ == "__main__":
     p.add_argument(
         "cmd",
         nargs="?",
-        default="idle",  # default to 'idle' (which starts scheduler)
-        choices=["idle","scheduler","weekly","premarket","evening","test-watchlist","test-entry"]
+        default="idle",
+        choices=[
+            "idle","scheduler",
+            "weekly","premarket","evening",
+            "test-watchlist","test-watchlist-force","test-entry"
+        ]
     )
     args = p.parse_args()
     asyncio.run(globals()[args.cmd.replace('-', '_')]())
