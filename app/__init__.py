@@ -1,1 +1,1 @@
-__all__ = []
+# marks detectors as a package
