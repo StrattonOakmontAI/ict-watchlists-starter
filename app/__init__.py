@@ -1,1 +1,1 @@
-# marks detectors as a package
+# package
