@@ -35,13 +35,19 @@ async def test_entry():
 async def run_once():
     print("Container up; use DigitalOcean Console → Run Command to invoke jobs.")
 
+# NEW: keep the container alive so DO marks the Worker healthy
+async def idle():
+    print("Idle worker running. Waiting for scheduled jobs or console commands...")
+    while True:
+        await asyncio.sleep(3600)
+
 if __name__ == "__main__":
     p = argparse.ArgumentParser()
     p.add_argument(
         "cmd",
         nargs="?",
-        default="run-once",
-        choices=["run-once", "weekly", "premarket", "evening", "test-watchlist", "test-entry"]
+        default="idle",  # default to idle is safe
+        choices=["idle", "run-once", "weekly", "premarket", "evening", "test-watchlist", "test-entry"]
     )
     args = p.parse_args()
     asyncio.run(globals()[args.cmd.replace('-', '_')]())
