@@ -198,6 +198,14 @@ async def post_watchlist(kind: str):
     ]
     await send_watchlist(header, fields)
 
-    # Also post top 5 entries to 🚨entries (chart PNGs can be added later)
+        # Also post top 5 entries to 🚨entries (now with real details)
     for r in rows[:5]:
-        await send_entry(r["symbol"])
+        await send_entry_detail(
+            symbol=r["symbol"],
+            direction=r["direction"],
+            entry=float(r["entry"]),
+            stop=float(r["stop"]),
+            targets=[float(x) for x in r["targets"]],
+            score=float(r["score"]),
+            bias=r.get("bias", {}),
+        )
