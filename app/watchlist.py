@@ -1,3 +1,4 @@
+import os
 import asyncio
 from datetime import datetime, timedelta
 import pandas as pd
@@ -15,13 +16,17 @@ from app.bias.ddoi import ddoi_from_chain
 from app.ranking import score
 from app.notify import send_watchlist, send_entry
 
+# knobs to stay within API limits
+MAX_SYMBOLS = int(os.getenv("MAX_SYMBOLS", "25"))
+MAX_CONCURRENCY = int(os.getenv("MAX_CONCURRENCY", "6"))
 
-# Timezone string (we mostly label outputs; scheduling is handled in cli.py)
-PT_TZ = settings.tz
+PT_TZ = settings.tz  # label only; scheduling is in cli.py
 
 
 def _targets_from_R(entry: float, stop: float, liq: list[float]) -> list[float]:
-    """Build T1–T4 using nearest liquidity for T1/T2 and pure-R for T3/T4."""
+    """
+    Build T1–T4 using nearest liquidity for T1/T2 and pure-R for T3/T4.
+    """
     R = abs(entry - stop)
     direction_up = entry > stop
     r_targets = [entry + (i * R if direction_up else -i * R) for i in (1, 2, 3, 4)]
@@ -29,13 +34,12 @@ def _targets_from_R(entry: float, stop: float, liq: list[float]) -> list[float]:
         [x for x in liq if (x > entry if direction_up else x < entry)],
         key=lambda x: abs(x - entry),
     )
-    # choose nearest in direction for T1/T2 if present
     t1 = liq_sorted[0] if liq_sorted else r_targets[0]
     t2 = liq_sorted[1] if len(liq_sorted) > 1 else r_targets[1]
     t3, t4 = r_targets[2], r_targets[3]
     return [round(x, 2) for x in (t1, t2, t3, t4)]
 
-# --- PATCH: safer analyze_symbol with API error guard ---
+
 async def analyze_symbol(
     p: Polygon, sym: str, tf: tuple[int, str] = (5, "minute")
 ) -> dict | None:
@@ -47,7 +51,7 @@ async def analyze_symbol(
     to = datetime.utcnow().date()
     frm = (datetime.utcnow() - timedelta(days=10)).date()
 
-    # Fetch aggregates with guard (skip symbol on any API error or 429)
+    # Fetch aggregates with guard (skip symbol on any API error)
     try:
         df = await p.aggs(sym, tf[0], tf[1], frm.isoformat(), to.isoformat())
     except Exception:
@@ -56,7 +60,7 @@ async def analyze_symbol(
     if df.empty or len(df) < 50:
         return None
 
-    # Ensure timezone-aware index, convert to PT for labeling if needed
+    # Ensure tz-aware → convert to PT
     if df.index.tz is None:
         df.index = df.index.tz_localize("UTC")
     df = df.tz_convert("America/Los_Angeles")
@@ -101,7 +105,7 @@ async def analyze_symbol(
     if entry is None or stop is None or direction is None:
         return None
 
-    # Options chain snapshot → DDOI + a basic liquidity presence check
+    # Options chain snapshot → DDOI + basic liquidity presence check
     try:
         chain = await p.options_chain_snapshot(sym)
     except Exception:
@@ -109,7 +113,7 @@ async def analyze_symbol(
     ddoi = ddoi_from_chain(chain)
     bias = {
         "opex_week": is_opex_week(datetime.utcnow().date()),
-        "earnings_soon": False,  # kept False for MVP; wire later
+        "earnings_soon": False,  # wire later
         "ddoi": "pos"
         if ddoi.get("net_delta", 0) > 0
         else ("neg" if ddoi.get("net_delta", 0) < 0 else "flat"),
@@ -144,17 +148,13 @@ async def analyze_symbol(
         "zones": zones,
         "bias": bias,
     }
-# --- END PATCH analyze_symbol ---
 
-    }
-
-# --- PATCH: throttled generate with concurrency + cap ---
-import os
-MAX_SYMBOLS = int(os.getenv("MAX_SYMBOLS", "25"))
-MAX_CONCURRENCY = int(os.getenv("MAX_CONCURRENCY", "6"))
 
 async def generate(kind: str) -> list[dict]:
-    """Analyze a capped universe concurrently and return sorted rows."""
+    """
+    Analyze a capped universe with bounded concurrency and return sorted rows.
+    Skips symbols that raise API errors to ensure the job completes.
+    """
     all_syms = load_universe()
     syms = all_syms[:MAX_SYMBOLS]
 
@@ -176,10 +176,12 @@ async def generate(kind: str) -> list[dict]:
         return rows
     finally:
         await p.close()
-# --- END PATCH generate ---
+
 
 async def post_watchlist(kind: str):
-    """Post a watchlist to Discord; also send a few entry alerts."""
+    """
+    Post a watchlist to Discord; also send a few entry alerts (demo alert payloads).
+    """
     rows = await generate(kind)
     if not rows:
         await send_watchlist(
@@ -187,7 +189,6 @@ async def post_watchlist(kind: str):
         )
         return
 
-    # Build concise lines for the 👀watchlist embed
     now_label = datetime.now().strftime("%Y-%m-%d %H:%M PT")
     header = f"{kind.title()} Watchlist – {now_label}"
     fields = [
@@ -197,6 +198,6 @@ async def post_watchlist(kind: str):
     ]
     await send_watchlist(header, fields)
 
-    # Also post top 5 entries to 🚨entries (PNG charts come later)
+    # Also post top 5 entries to 🚨entries (chart PNGs can be added later)
     for r in rows[:5]:
         await send_entry(r["symbol"])
