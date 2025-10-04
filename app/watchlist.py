@@ -15,6 +15,8 @@ from app.bias.opex import is_opex_week
 from app.bias.ddoi import ddoi_from_chain
 from app.ranking import score
 from app.notify import send_watchlist, send_entry
+from app.notify import send_watchlist, send_entry, send_entry_detail
+
 
 # knobs to stay within API limits
 MAX_SYMBOLS = int(os.getenv("MAX_SYMBOLS", "25"))
