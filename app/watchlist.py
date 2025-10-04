@@ -35,7 +35,7 @@ def _targets_from_R(entry: float, stop: float, liq: list[float]) -> list[float]:
     t3, t4 = r_targets[2], r_targets[3]
     return [round(x, 2) for x in (t1, t2, t3, t4)]
 
-
+# --- PATCH: safer analyze_symbol with API error guard ---
 async def analyze_symbol(
     p: Polygon, sym: str, tf: tuple[int, str] = (5, "minute")
 ) -> dict | None:
@@ -47,8 +47,12 @@ async def analyze_symbol(
     to = datetime.utcnow().date()
     frm = (datetime.utcnow() - timedelta(days=10)).date()
 
-    # Fetch aggregates
-    df = await p.aggs(sym, tf[0], tf[1], frm.isoformat(), to.isoformat())
+    # Fetch aggregates with guard (skip symbol on any API error or 429)
+    try:
+        df = await p.aggs(sym, tf[0], tf[1], frm.isoformat(), to.isoformat())
+    except Exception:
+        return None
+
     if df.empty or len(df) < 50:
         return None
 
@@ -74,7 +78,6 @@ async def analyze_symbol(
     direction = None
 
     if long_bias:
-        # last bullish FVG or OB
         bull_zones = [z for z in fvg_list if z["dir"] == "bull"] + [
             z for z in ob_list if z["dir"] == "bull"
         ]
@@ -141,20 +144,39 @@ async def analyze_symbol(
         "zones": zones,
         "bias": bias,
     }
+# --- END PATCH analyze_symbol ---
 
+    }
+
+# --- PATCH: throttled generate with concurrency + cap ---
+import os
+MAX_SYMBOLS = int(os.getenv("MAX_SYMBOLS", "25"))
+MAX_CONCURRENCY = int(os.getenv("MAX_CONCURRENCY", "6"))
 
 async def generate(kind: str) -> list[dict]:
-    """Analyze the whole universe concurrently and return sorted rows."""
-    syms = load_universe()
+    """Analyze a capped universe concurrently and return sorted rows."""
+    all_syms = load_universe()
+    syms = all_syms[:MAX_SYMBOLS]
+
     p = Polygon()
+    sem = asyncio.Semaphore(MAX_CONCURRENCY)
+
+    async def worker(s: str):
+        async with sem:
+            try:
+                return await analyze_symbol(p, s)
+            except Exception:
+                return None
+
     try:
-        tasks = [analyze_symbol(p, s) for s in syms]
-        rows = [r for r in await asyncio.gather(*tasks, return_exceptions=False) if r]
+        tasks = [worker(s) for s in syms]
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+        rows = [r for r in results if isinstance(r, dict) and r]
         rows.sort(key=lambda x: x["score"], reverse=True)
         return rows
     finally:
         await p.close()
-
+# --- END PATCH generate ---
 
 async def post_watchlist(kind: str):
     """Post a watchlist to Discord; also send a few entry alerts."""
