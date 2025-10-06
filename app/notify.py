@@ -12,9 +12,20 @@ async def _post(webhook: str, payload: dict):
         print("[green]Sent[/]")
 
 async def send_watchlist(title: str, items: list[str]):
+    """
+    Post a clean watchlist embed (no placeholder text).
+    """
+    # Build fields from the items list (one per line)
+    fields = [{"name": f"{i+1}.", "value": v, "inline": False} for i, v in enumerate(items)]
+
     embed = {
         "title": title,
-        "description": "Starter watchlist message (replace with real data during MVP)",
+        # no description field = no placeholder line
+        "fields": fields,
+        "footer": {"text": "Not financial advice"},
+    }
+    await _post(WL, {"username": "ICT Watchlists 👀", "embeds": [embed]})
+
         "fields": [{"name": f"{i+1}.", "value": v} for i, v in enumerate(items)],
         "footer": {"text": "Not financial advice"}
     }
