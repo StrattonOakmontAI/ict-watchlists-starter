@@ -56,9 +56,12 @@ async def send_entry_detail(
     targets: list[float],
     score: float,
     bias: dict | None = None,
+    option: dict | None = None,
+    proj_move_pct: float | None = None,
 ) -> None:
     """
     Post a detailed entry alert to the 🚨entries webhook with entry/stop/T1–T4.
+    Now includes optional Option line + Projection if provided.
     """
     bias = bias or {}
     r_val = abs(float(entry) - float(stop))
@@ -68,18 +71,31 @@ async def send_entry_detail(
         f"OPEX {'Yes' if bias.get('opex_week') else 'No'} • "
         f"Earnings {'Soon' if bias.get('earnings_soon') else 'No'}"
     )
+
+    fields = [
+        {"name": "Entry / Stop / 1R", "value": f"{entry:.2f} / {stop:.2f} / {r_val:.2f}"},
+        {"name": "Targets (T1–T4)", "value": f"{t1:.2f} | {t2:.2f} | {t3:.2f} | {t4:.2f}"},
+        {"name": "Score", "value": f"{int(score)}"},
+        {"name": "Bias", "value": bias_line},
+    ]
+
+    # Optional: Option line + Projection
+    if option:
+        opt_txt = (
+            f"{option.get('type','?')} Δ{option.get('delta','?')} "
+            f"{option.get('expiry','?')} {option.get('strike','?')} @ {option.get('premium','?')} "
+            f"• ROI {option.get('roi_pct','?')}% • DTE {option.get('dte','?')} • Spread {option.get('spread','?')}"
+        )
+        fields.insert(1, {"name": "Option", "value": opt_txt})
+    if proj_move_pct is not None:
+        fields.insert(2, {"name": "Projection", "value": f"{proj_move_pct:.1f}%"})
+
     embed = {
         "title": f"ENTRY – {symbol} ({direction.upper()})",
-        "fields": [
-            {"name": "Entry / Stop / 1R", "value": f"{entry:.2f} / {stop:.2f} / {r_val:.2f}"},
-            {"name": "Targets (T1–T4)", "value": f"{t1:.2f} | {t2:.2f} | {t3:.2f} | {t4:.2f}"},
-            {"name": "Score", "value": f"{int(score)}"},
-            {"name": "Bias", "value": bias_line},
-        ],
+        "fields": fields,
         "footer": {"text": "Scale: 50/25/15/10 at T1–T4 • Not financial advice"},
     }
     await _post(EN, {"username": "ICT Entries 🚨", "embeds": [embed]})
-
 
 # --- Keep the simple demo call for backward compatibility ----------------
 
