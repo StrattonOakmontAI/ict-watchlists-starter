@@ -235,4 +235,3 @@ async def post_watchlist(kind: str):
             )
     finally:
         await p2.close()
-
