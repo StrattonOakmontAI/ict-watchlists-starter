@@ -231,7 +231,7 @@ async def post_watchlist(kind: str):
 
     # Detailed entries (top 5)
     for r in rows[:5]:
-        await send_entry_detail(
+                await send_entry_detail(
             symbol=r["symbol"],
             direction=r["direction"],
             entry=float(r["entry"]),
@@ -239,4 +239,6 @@ async def post_watchlist(kind: str):
             targets=[float(x) for x in r["targets"]],
             score=float(r["score"]),
             bias=r.get("bias", {}),
+            option=r.get("option"),
+            proj_move_pct=r.get("proj_move_pct"),
         )
