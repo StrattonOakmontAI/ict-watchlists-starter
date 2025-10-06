@@ -17,6 +17,8 @@ from app.ranking import score
 from app.notify import send_watchlist, send_entry
 from app.notify import send_watchlist, send_entry, send_entry_detail, send_entry_detail_with_chart
 from app.charts import render_chart
+from app.strat.patterns import detect_strat
+from app.strat.mtf import htf_bias, mtf_align
 
 # knobs to stay within API limits
 MAX_SYMBOLS = int(os.getenv("MAX_SYMBOLS", "25"))
