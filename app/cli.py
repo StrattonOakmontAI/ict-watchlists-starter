@@ -144,6 +144,27 @@ async def evening():
         return
     await post_watchlist("evening")
 # === END MVP WATCHLIST GENERATORS ==========================================
+# === PT scheduler override: weekdays only ==============================
+# Paste above the `if __name__ == "__main__":` line. Replaces the scheduler().
+from apscheduler.schedulers.asyncio import AsyncIOScheduler
+from apscheduler.triggers.cron import CronTrigger
+import pytz
+
+PT = pytz.timezone("America/Los_Angeles")
+
+async def scheduler(startup_log="Starting PT scheduler (weekdays only)..."):
+    print(startup_log)
+    sched = AsyncIOScheduler(timezone=PT)
+    # Daily, Mon–Fri, local LA time
+    sched.add_job(premarket, CronTrigger(day_of_week="mon-fri", hour=6,  minute=0))   # 06:00 PT
+    sched.add_job(evening,   CronTrigger(day_of_week="mon-fri", hour=17, minute=30))  # 17:30 PT
+    # Weekly, Sunday only
+    sched.add_job(weekly,    CronTrigger(day_of_week="sun",     hour=8,  minute=0))   # 08:00 PT
+    sched.start()
+    print("Scheduler started (PT weekdays). Waiting for triggers...")
+    while True:
+        await asyncio.sleep(3600)
+# === END override ======================================================
 
 if __name__ == "__main__":
     p = argparse.ArgumentParser()
