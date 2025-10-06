@@ -1,3 +1,4 @@
+# app/watchlist.py
 import os
 import asyncio
 from datetime import datetime, timedelta
@@ -6,27 +7,34 @@ import pandas as pd
 from app.config import settings
 from app.polygon_client import Polygon
 from app.universe import load_universe
+
+# ICT/SMC detectors
 from app.detectors.swings import swings
 from app.detectors.bos import bos
 from app.detectors.fvg import fvgs
 from app.detectors.ob import order_blocks
 from app.detectors.liquidity import equal_highs_lows
+
+# Bias inputs
 from app.bias.opex import is_opex_week
 from app.bias.ddoi import ddoi_from_chain
-from app.ranking import score
-from app.notify import send_watchlist, send_entry
-from app.notify import send_watchlist, send_entry, send_entry_detail, send_entry_detail_with_chart
-from app.charts import render_chart
+
+# The Strat
 from app.strat.patterns import detect_strat
 from app.strat.mtf import htf_bias, mtf_align
 
-# knobs to stay within API limits
+# Scoring + Discord
+from app.ranking import score
+from app.notify import send_watchlist, send_entry_detail
+
+# Throttles (edit in DO → Settings → Environment Variables)
 MAX_SYMBOLS = int(os.getenv("MAX_SYMBOLS", "25"))
 MAX_CONCURRENCY = int(os.getenv("MAX_CONCURRENCY", "6"))
 
-PT_TZ = settings.tz  # label only; scheduling is in cli.py
+PT_TZ = settings.tz  # label only; scheduling handled in cli.py
 
 
+# ---------- helpers ----------
 def _targets_from_R(entry: float, stop: float, liq: list[float]) -> list[float]:
     """
     Build T1–T4 using nearest liquidity for T1/T2 and pure-R for T3/T4.
@@ -44,48 +52,75 @@ def _targets_from_R(entry: float, stop: float, liq: list[float]) -> list[float]:
     return [round(x, 2) for x in (t1, t2, t3, t4)]
 
 
+# ---------- core analysis ----------
 async def analyze_symbol(
     p: Polygon, sym: str, tf: tuple[int, str] = (5, "minute")
 ) -> dict | None:
     """
-    Pull data for one symbol, run basic ICT detectors, compute an entry with T1–T4,
-    and return a ranked row. Returns None if no valid setup or score below threshold.
+    Pull data for one symbol, run ICT + Strat with MTF continuity,
+    and produce a candidate row (or None if it doesn't meet rules/score).
     """
     # Pull ~10 calendar days to cover 5+ trading days of 5m bars
     to = datetime.utcnow().date()
     frm = (datetime.utcnow() - timedelta(days=10)).date()
 
-    # Fetch aggregates with guard (skip symbol on any API error)
+    # LTF aggregates (5m)
     try:
         df = await p.aggs(sym, tf[0], tf[1], frm.isoformat(), to.isoformat())
     except Exception:
         return None
-
     if df.empty or len(df) < 50:
         return None
-
-    # Ensure tz-aware → convert to PT
     if df.index.tz is None:
         df.index = df.index.tz_localize("UTC")
     df = df.tz_convert("America/Los_Angeles")
 
-    # Basic detectors
+    # --- HTF bars for MTF continuity ---
+    try:
+        df_4h = await p.aggs(
+            sym,
+            240,
+            "minute",
+            (datetime.utcnow() - timedelta(days=30)).date().isoformat(),
+            to.isoformat(),
+        )
+    except Exception:
+        df_4h = None
+    try:
+        df_d = await p.aggs(
+            sym,
+            1,
+            "day",
+            (datetime.utcnow() - timedelta(days=60)).date().isoformat(),
+            to.isoformat(),
+        )
+    except Exception:
+        df_d = None
+
+    # ICT detectors on LTF
     sw_hi, sw_lo = swings(df, n=3)
     bos_list = bos(df, sw_hi, sw_lo)
     fvg_list = fvgs(df)
     ob_list = order_blocks(df, bos_list)
     eqh, eql = equal_highs_lows(df)
 
-    # Simple directional bias from recent BOS
-    long_bias = any(b["dir"] == "bull" for b in bos_list[-3:])
-    short_bias = any(b["dir"] == "bear" for b in bos_list[-3:])
+    # The Strat on LTF + HTF bias
+    strat = detect_strat(df)
+    if not strat:
+        return None
+    bias4h = htf_bias(df_4h) if df_4h is not None and not df_4h.empty else "flat"
+    bias1d = htf_bias(df_d) if df_d is not None and not df_d.empty else "flat"
+    bias_dir = bias4h if bias4h != "flat" else bias1d
+    if not mtf_align(strat["dir"], bias_dir):
+        return None
 
+    # Entry/stop selection using Strat direction and most recent ICT zone
     entry = None
     stop = None
     zones: list[dict] = []
-    direction = None
+    direction = "long" if strat["dir"] == "bull" else "short"
 
-    if long_bias:
+    if direction == "long":
         bull_zones = [z for z in fvg_list if z["dir"] == "bull"] + [
             z for z in ob_list if z["dir"] == "bull"
         ]
@@ -93,9 +128,8 @@ async def analyze_symbol(
         if cand:
             entry = (cand["low"] + cand["high"]) / 2
             stop = cand["low"]
-            direction = "long"
             zones.append({"low": cand["low"], "high": cand["high"]})
-    elif short_bias:
+    else:
         bear_zones = [z for z in fvg_list if z["dir"] == "bear"] + [
             z for z in ob_list if z["dir"] == "bear"
         ]
@@ -103,10 +137,9 @@ async def analyze_symbol(
         if cand:
             entry = (cand["low"] + cand["high"]) / 2
             stop = cand["high"]
-            direction = "short"
             zones.append({"low": cand["low"], "high": cand["high"]})
 
-    if entry is None or stop is None or direction is None:
+    if entry is None or stop is None:
         return None
 
     # Options chain snapshot → DDOI + basic liquidity presence check
@@ -117,22 +150,21 @@ async def analyze_symbol(
     ddoi = ddoi_from_chain(chain)
     bias = {
         "opex_week": is_opex_week(datetime.utcnow().date()),
-        "earnings_soon": False,  # wire later
+        "earnings_soon": False,  # can be wired via polygon_client.earnings_calendar()
         "ddoi": "pos"
         if ddoi.get("net_delta", 0) > 0
         else ("neg" if ddoi.get("net_delta", 0) < 0 else "flat"),
     }
     spread_ok = bool(chain.get("results") or chain.get("options"))
 
-    # Confluence flags
+    # Confluence & score
     conf = {
         "bos": bool(bos_list),
         "fvg": bool(fvg_list),
         "ob": bool(ob_list),
         "eq_liq": bool(eqh or eql),
+        "strat": True,  # required above
     }
-
-    # Score & threshold
     atr_like = float((df["high"] - df["low"]).tail(14).mean())
     sc = score(conf, bias, atr_like, spread_ok)
     if sc < settings.min_score:
@@ -144,13 +176,16 @@ async def analyze_symbol(
 
     return {
         "symbol": sym,
-        "direction": direction,
+        "direction": "bullish" if direction == "long" else "bearish",
         "entry": round(entry, 2),
         "stop": round(stop, 2),
         "targets": targets,
         "score": sc,
         "zones": zones,
         "bias": bias,
+        "pattern": strat["name"],
+        "pattern_types": strat["types"],
+        "mtf_bias": bias_dir,
     }
 
 
@@ -170,70 +205,4 @@ async def generate(kind: str) -> list[dict]:
             try:
                 return await analyze_symbol(p, s)
             except Exception:
-                return None
-
-    try:
-        tasks = [worker(s) for s in syms]
-        results = await asyncio.gather(*tasks, return_exceptions=True)
-        rows = [r for r in results if isinstance(r, dict) and r]
-        rows.sort(key=lambda x: x["score"], reverse=True)
-        return rows
-    finally:
-        await p.close()
-
-
-async def post_watchlist(kind: str):
-    """
-    Post a watchlist to Discord; also send a few entry alerts (demo alert payloads).
-    """
-    rows = await generate(kind)
-    if not rows:
-        await send_watchlist(
-            f"{kind.title()} – No Setups (min score {settings.min_score})", []
-        )
-        return
-
-    now_label = datetime.now().strftime("%Y-%m-%d %H:%M PT")
-    header = f"{kind.title()} Watchlist – {now_label}"
-    fields = [
-        f"{r['symbol']} {r['direction'].upper()} – Entry {r['entry']} | "
-        f"Stop {r['stop']} | T1 {r['targets'][0]} | Score {int(r['score'])}"
-        for r in rows[:20]
-    ]
-    await send_watchlist(header, fields)
-
-             # Also post top 5 entries to 🚨entries with PNG chart
-    p2 = Polygon()
-    try:
-        for r in rows[:5]:
-            chart_png = None
-            try:
-                to = datetime.utcnow().date()
-                frm = (datetime.utcnow() - timedelta(days=7)).date()
-                df = await p2.aggs(r["symbol"], 5, "minute", frm.isoformat(), to.isoformat())
-                if not df.empty:
-                    if df.index.tz is None:
-                        df.index = df.index.tz_localize("UTC")
-                    df = df.tz_convert("America/Los_Angeles")
-                    chart_png = render_chart(
-                        df.tail(200),
-                        zones=r.get("zones", []),
-                        entry=float(r["entry"]),
-                        stop=float(r["stop"]),
-                        targets=[float(x) for x in r["targets"]],
-                    )
-            except Exception:
-                chart_png = None
-
-            await send_entry_detail_with_chart(
-                symbol=r["symbol"],
-                direction=r["direction"],
-                entry=float(r["entry"]),
-                stop=float(r["stop"]),
-                targets=[float(x) for x in r["targets"]],
-                score=float(r["score"]),
-                bias=r.get("bias", {}),
-                chart_png=chart_png,
-            )
-    finally:
-        await p2.close()
+                r
