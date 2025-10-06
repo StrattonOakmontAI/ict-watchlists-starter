@@ -201,7 +201,6 @@ async def post_watchlist(kind: str):
     await send_watchlist(header, fields)
 
              # Also post top 5 entries to 🚨entries with PNG chart
-    from datetime import datetime, timedelta
     p2 = Polygon()
     try:
         for r in rows[:5]:
