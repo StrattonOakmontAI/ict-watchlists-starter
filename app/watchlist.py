@@ -15,8 +15,8 @@ from app.bias.opex import is_opex_week
 from app.bias.ddoi import ddoi_from_chain
 from app.ranking import score
 from app.notify import send_watchlist, send_entry
-from app.notify import send_watchlist, send_entry, send_entry_detail
-
+from app.notify import send_watchlist, send_entry, send_entry_detail, send_entry_detail_with_chart
+from app.charts import render_chart
 
 # knobs to stay within API limits
 MAX_SYMBOLS = int(os.getenv("MAX_SYMBOLS", "25"))
@@ -200,14 +200,40 @@ async def post_watchlist(kind: str):
     ]
     await send_watchlist(header, fields)
 
-        # Also post top 5 entries to 🚨entries (now with real details)
-    for r in rows[:5]:
-        await send_entry_detail(
-            symbol=r["symbol"],
-            direction=r["direction"],
-            entry=float(r["entry"]),
-            stop=float(r["stop"]),
-            targets=[float(x) for x in r["targets"]],
-            score=float(r["score"]),
-            bias=r.get("bias", {}),
-        )
+             # Also post top 5 entries to 🚨entries with PNG chart
+    from datetime import datetime, timedelta
+    p2 = Polygon()
+    try:
+        for r in rows[:5]:
+            chart_png = None
+            try:
+                to = datetime.utcnow().date()
+                frm = (datetime.utcnow() - timedelta(days=7)).date()
+                df = await p2.aggs(r["symbol"], 5, "minute", frm.isoformat(), to.isoformat())
+                if not df.empty:
+                    if df.index.tz is None:
+                        df.index = df.index.tz_localize("UTC")
+                    df = df.tz_convert("America/Los_Angeles")
+                    chart_png = render_chart(
+                        df.tail(200),
+                        zones=r.get("zones", []),
+                        entry=float(r["entry"]),
+                        stop=float(r["stop"]),
+                        targets=[float(x) for x in r["targets"]],
+                    )
+            except Exception:
+                chart_png = None
+
+            await send_entry_detail_with_chart(
+                symbol=r["symbol"],
+                direction=r["direction"],
+                entry=float(r["entry"]),
+                stop=float(r["stop"]),
+                targets=[float(x) for x in r["targets"]],
+                score=float(r["score"]),
+                bias=r.get("bias", {}),
+                chart_png=chart_png,
+            )
+    finally:
+        await p2.close()
+
