@@ -4,7 +4,8 @@
 from __future__ import annotations
 import os
 from datetime import datetime
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
+from urllib.parse import urlparse, parse_qs, urlencode, urlunparse
 
 import httpx
 import pandas as pd
@@ -66,19 +67,50 @@ class Polygon:
 
     # ------------------------- Options snapshots -------------------------
 
-    async def options_chain_snapshot(self, ticker: str) -> Dict[str, Any]:
+    async def options_chain_snapshot(
+        self,
+        ticker: str,
+        limit: int = 250,          # Polygon docs: max 250
+        paginate: bool = False,    # turn on later if you need more than 250
+        max_pages: int = 8,
+    ) -> Dict[str, Any]:
         """
-        GET /v3/snapshot/options/{ticker}
+        GET /v3/snapshot/options/{underlyingAsset}
         Returns JSON list of contracts including quotes/greeks when available.
+        NOTE: 'limit' must be <= 250 or Polygon returns 400.
         """
-        url = f"https://api.polygon.io/v3/snapshot/options/{ticker.upper()}"
-        r = await self.x.get(url, params={"limit": 1000, "apiKey": self.key})
+        base = f"https://api.polygon.io/v3/snapshot/options/{ticker.upper()}"
+        params = {"limit": min(250, int(limit)), "apiKey": self.key}
+
+        # First page
+        r = await self.x.get(base, params=params)
         r.raise_for_status()
-        return r.json()
+        data = r.json()
+        results = list(data.get("results") or [])
+
+        # Optional pagination (next_url); off by default to save calls
+        if paginate:
+            next_url = data.get("next_url")
+            pages = 0
+            while next_url and pages < max_pages:
+                # Ensure apiKey is present on the next_url (Polygon usually includes it)
+                u = urlparse(next_url)
+                q = parse_qs(u.query)
+                if "apiKey" not in q:
+                    q["apiKey"] = [self.key]
+                    next_url = urlunparse((u.scheme, u.netloc, u.path, u.params, urlencode(q, doseq=True), u.fragment))
+                r2 = await self.x.get(next_url)
+                r2.raise_for_status()
+                d2 = r2.json()
+                results.extend(d2.get("results") or [])
+                next_url = d2.get("next_url")
+                pages += 1
+
+        return {"results": results}
 
     # ------------------------- Earnings (next report date) -------------------------
 
-    async def next_earnings_date(self, ticker: str) -> str | None:
+    async def next_earnings_date(self, ticker: str) -> Optional[str]:
         """
         GET /v3/reference/earnings?ticker=...&report_date.gte=TODAY&order=asc&sort=report_date&limit=1
         Returns 'YYYY-MM-DD' or None if no upcoming earnings found.
