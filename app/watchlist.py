@@ -106,6 +106,13 @@ def _mid(bid: float | None, ask: float | None) -> float | None:
     return 0.5 * (bid + ask)
 
 
+def _asfloat(x):
+    try:
+        return float(x)
+    except Exception:
+        return None
+
+
 def _pick_option(chain: dict, spot: float, direction: str) -> dict | None:
     """
     Pick a liquid contract near target delta within the DTE window.
@@ -131,12 +138,6 @@ def _pick_option(chain: dict, spot: float, direction: str) -> dict | None:
             "type": typ, "strike": _asfloat(strike), "expiry": expiry, "delta": _asfloat(delta),
             "bid": _asfloat(bid), "ask": _asfloat(ask), "oi": int(oi) if isinstance(oi, (int, float)) else 0
         }
-
-    def _asfloat(x):
-        try:
-            return float(x)
-        except Exception:
-            return None
 
     # Filter by type
     want = "call" if direction == "long" else "put"
@@ -404,7 +405,7 @@ async def post_watchlist(kind: str):
             f"Score {int(r['score'])}{proj}{eflag}"
         )
 
-      fields = [_fmt(r) for r in rows[:20]]
+    fields = [_fmt(r) for r in rows[:20]]
     if not fields:
         fields = [f"No Setups (min score {int(MIN_SCORE)}, proj {int(PROJ_MIN*100)}–{int(PROJ_MAX*100)}% over {PROJ_DAYS}d)"]
 
