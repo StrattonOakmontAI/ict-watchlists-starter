@@ -1,8 +1,10 @@
+cat > app/backtest.py <<'PY'
 # app/backtest.py
-# Minimal, robust journal backtester (Polygon-based)
-# - Reads /mnt/data/journal.csv
-# - Simulates entries with T1/T2/T3/T4, stop-first, move to BE after T1
-# - Produces R-based stats and can post a summary to Discord
+# Journal backtester (Polygon)
+# - Auto-fetch /mnt/data/journal.csv from GitHub if missing
+# - Tolerant CSV parser (aliases + multiple timestamp formats)
+# - Simulates T1/T2/T3/T4, stop-first, move-to-BE after T1
+# - Posts compact summary to Discord (reuses send_watchlist)
 
 import os
 import sys
@@ -19,14 +21,40 @@ from app.config import settings
 from app.notify import send_watchlist  # reuse for summary post
 
 JOURNAL_PATH = os.getenv("JOURNAL_PATH", "/mnt/data/journal.csv")
-
-# Defaults (override via env or CLI)
-DEF_DAYS = int(os.getenv("BACKTEST_DAYS", "5"))           # forward window in trading days
-DEF_TF_MIN = int(os.getenv("BACKTEST_TF_MIN", "5"))       # 1 or 5 minute bars
-DEF_LIMIT = int(os.getenv("BACKTEST_LIMIT", "50"))        # max trades to test
-DEF_CONC = int(os.getenv("BACKTEST_CONCURRENCY", "5"))    # API concurrency
+DEF_DAYS = int(os.getenv("BACKTEST_DAYS", "5"))
+DEF_TF_MIN = int(os.getenv("BACKTEST_TF_MIN", "5"))
+DEF_LIMIT = int(os.getenv("BACKTEST_LIMIT", "50"))
+DEF_CONC = int(os.getenv("BACKTEST_CONCURRENCY", "5"))
 
 PT = settings.tz  # America/Los_Angeles tzinfo
+
+
+def ensure_journal_local() -> bool:
+    """
+    Ensure /mnt/data/journal.csv exists. If missing and GH_* envs are set,
+    pull from GitHub repo contents API.
+    """
+    if os.path.exists(JOURNAL_PATH):
+        return True
+    repo = os.getenv('GH_REPO')
+    tok  = os.getenv('GH_TOKEN')
+    br   = os.getenv('GH_BRANCH', 'main')
+    pth  = os.getenv('GH_PATH', 'journal/journal.csv')
+    if not (repo and tok):
+        return False
+    try:
+        import httpx, base64, pathlib
+        url = f"https://api.github.com/repos/{repo}/contents/{pth}"
+        hdr = {'Authorization': f'Bearer {tok}', 'Accept': 'application/vnd.github+json'}
+        r = httpx.get(url, headers=hdr, params={'ref': br}, timeout=20)
+        r.raise_for_status()
+        data = base64.b64decode(r.json()['content'])
+        pathlib.Path(os.path.dirname(JOURNAL_PATH)).mkdir(parents=True, exist_ok=True)
+        with open(JOURNAL_PATH, 'wb') as f:
+            f.write(data)
+        return True
+    except Exception:
+        return False
 
 
 @dataclass
@@ -56,49 +84,45 @@ class Trade:
         return not self.is_long
 
 
-# --- replace the existing _parse_row with this tolerant version ---
 def _parse_row(row: dict) -> Trade | None:
     """
     Tolerant CSV row parser:
-      - Accepts header aliases: timestamp_pt|timestamp|time, direction|dir,
-        t1|T1, etc.
-      - Accepts timestamps in:
+      - Accepts aliases: timestamp_pt|timestamp|time, direction|dir, t1|T1, etc.
+      - Accepts timestamps:
           "YYYY-MM-DD HH:MM:SS PT"
           "YYYY-MM-DD HH:MM PT"
-          ISO-like: "YYYY-MM-DDTHH:MM[:SS][.sss]Z" or with -07:00 offset
+          ISO-like: "YYYY-MM-DDTHH:MM[:SS][.sss][Z|±HH:MM]"
     """
+    # normalize keys: lowercase + strip spaces
+    norm = { (k or "").strip().lower(): (v or "").strip() for k,v in row.items() }
+
     def pick(*names, default=None):
         for n in names:
-            if n in row and row[n] not in (None, ""):
-                return row[n]
+            if n in norm and norm[n] != "":
+                return norm[n]
         return default
 
-    ts_raw = (pick("timestamp_pt", "timestamp", "time") or "").strip()
-    sym    = (pick("symbol", "ticker") or "").strip().upper()
-    direction = (pick("direction", "dir") or "").strip().lower()
-    entry  = pick("entry")
-    stop   = pick("stop")
-    t1     = pick("t1", "T1")
-    t2     = pick("t2", "T2")
-    t3     = pick("t3", "T3")
-    t4     = pick("t4", "T4")
-    kind   = (pick("kind", "type", default="entry") or "entry").strip()
+    ts_raw   = pick("timestamp_pt", "timestamp", "time")
+    sym      = (pick("symbol", "ticker") or "").upper()
+    direction= pick("direction", "dir") or ""
+    entry    = pick("entry"); stop = pick("stop")
+    t1 = pick("t1", "t1 ", "t1\t", "t1\r", "t1\n", "t1.", "t1,","t1;","t1:","t1=","t1-","t1_","t1|","t1\\","t1/","t1?","t1!","t1\"","t1'","t1)", "t1]","t1}>","T1")
+    t2 = pick("t2","T2"); t3 = pick("t3","T3"); t4 = pick("t4","T4")
+    kind     = pick("kind", "type", default="entry") or "entry"
 
-    # required fields present?
-    need = [ts_raw, sym, direction, entry, stop, t1, t2, t3, t4]
-    if any(v in (None, "") for v in need):
+    # required fields?
+    if not all([ts_raw, sym, direction, entry, stop, t1, t2, t3, t4]):
         return None
 
-    # parse numbers
+    # numbers
     try:
         entry = float(entry); stop = float(stop)
         t1 = float(t1); t2 = float(t2); t3 = float(t3); t4 = float(t4)
     except Exception:
         return None
 
-    # parse timestamp with a few fallback formats
-    from datetime import timezone
-    PT = settings.tz
+    # timestamp parsing
+    s = ts_raw.replace("  ", " ").strip()
     ts = None
     fmts = [
         "%Y-%m-%d %H:%M:%S PT",
@@ -108,16 +132,12 @@ def _parse_row(row: dict) -> Trade | None:
         "%Y-%m-%dT%H:%M:%S",
         "%Y-%m-%dT%H:%M",
     ]
-    s = ts_raw.replace("  ", " ").strip()
     for fmt in fmts:
         try:
+            dt = datetime.strptime(s, fmt)
             if fmt.endswith("PT"):
-                # assign PT tzinfo explicitly
-                dt = datetime.strptime(s, fmt)
                 ts = dt.replace(tzinfo=PT)
             else:
-                dt = datetime.strptime(s, fmt)
-                # if parsed as naive, assume PT; if offset aware, convert to PT
                 ts = dt if dt.tzinfo else dt.replace(tzinfo=PT)
                 if ts.tzinfo != PT:
                     ts = ts.astimezone(PT)
@@ -125,21 +145,20 @@ def _parse_row(row: dict) -> Trade | None:
         except Exception:
             continue
     if ts is None:
-        # last resort: try simple date only
         try:
             dt = datetime.strptime(s[:10], "%Y-%m-%d")
-            ts = dt.replace(hour=6, minute=30, tzinfo=PT)  # 6:30a PT as a default
+            ts = dt.replace(hour=6, minute=30, tzinfo=PT)
         except Exception:
             return None
 
     tr = Trade(ts=ts, symbol=sym, direction=direction, entry=entry, stop=stop,
                t1=t1, t2=t2, t3=t3, t4=t4, kind=kind)
     return tr if tr.risk_R > 0 else None
-# --- end replacement ---
-
 
 
 def load_trades(limit: int | None = None) -> list[Trade]:
+    if not os.path.exists(JOURNAL_PATH):
+        ensure_journal_local()  # try to auto-fetch
     if not os.path.exists(JOURNAL_PATH):
         print(f"Journal not found at {JOURNAL_PATH}")
         return []
@@ -150,35 +169,24 @@ def load_trades(limit: int | None = None) -> list[Trade]:
             t = _parse_row(r)
             if t:
                 trades.append(t)
-    trades.sort(key=lambda x: x.ts)  # oldest first
+    trades.sort(key=lambda x: x.ts)
     return trades[-limit:] if limit else trades
 
 
 async def fetch_bars(p: Polygon, sym: str, start_dt: datetime, days: int, tf_min: int) -> pd.DataFrame:
-    """Fetch minute aggregates spanning the forward window."""
     frm = (start_dt - timedelta(days=1)).date().isoformat()
-    to = (start_dt + timedelta(days=days + 1)).date().isoformat()
+    to  = (start_dt + timedelta(days=days + 1)).date().isoformat()
     df = await p.aggs(sym, tf_min, "minute", frm, to)
     if df.empty:
         return df
-    # Make tz-aware & convert to PT
     if df.index.tz is None:
         df.index = df.index.tz_localize("UTC")
     df = df.tz_convert(PT)
-    # Only consider bars at/after trade time
     df = df[df.index >= start_dt]
     return df
 
 
 def simulate_outcome(tr: Trade, df: pd.DataFrame) -> dict:
-    """
-    Simulate execution:
-      - Stop checked first each bar
-      - 50% @ T1, 25% @ T2, and 25% allocated to either T3 or T4 (whichever hits first)
-      - Move stop to breakeven after T1 for remaining size
-      - If window ends, mark remaining at last close
-    Returns: dict(realized_R, hit_seq, stop_hit, last_dt)
-    """
     if df.empty:
         return {"realized_R": 0.0, "hit_seq": [], "stop_hit": False, "last_dt": None}
 
@@ -195,12 +203,9 @@ def simulate_outcome(tr: Trade, df: pd.DataFrame) -> dict:
         mv = (price - tr.entry) if tr.is_long else (tr.entry - price)
         return mv / R if R > 0 else 0.0
 
-    stop_hit = False
-
     for dt, row in df.iterrows():
         hi = float(row["high"]); lo = float(row["low"]); cl = float(row["close"])
-
-        # 1) Stop first
+        # Stop first
         if tr.is_long:
             if lo <= stop_level:
                 realized_R += profit_R(stop_level) * remain
@@ -210,12 +215,8 @@ def simulate_outcome(tr: Trade, df: pd.DataFrame) -> dict:
                 realized_R += profit_R(stop_level) * remain
                 return {"realized_R": realized_R, "hit_seq": hit_seq, "stop_hit": True, "last_dt": dt}
 
-        # 2) Targets in order: T1, T2, then either T3 or T4
         # T1 (0.5)
-        if remain > 0 and (
-            (tr.is_long and hi >= tr.t1) or
-            (tr.is_short and lo <= tr.t1)
-        ):
+        if remain > 0 and ((tr.is_long and hi >= tr.t1) or (tr.is_short and lo <= tr.t1)):
             realized_R += profit_R(tr.t1) * 0.5
             remain -= 0.5
             hit_seq.append("T1")
@@ -224,35 +225,29 @@ def simulate_outcome(tr: Trade, df: pd.DataFrame) -> dict:
                 moved_to_be = True
 
         # T2 (0.25)
-        if remain > 0 and (
-            (tr.is_long and hi >= tr.t2) or
-            (tr.is_short and lo <= tr.t2)
-        ):
+        if remain > 0 and ((tr.is_long and hi >= tr.t2) or (tr.is_short and lo <= tr.t2)):
             realized_R += profit_R(tr.t2) * 0.25
             remain -= 0.25
             hit_seq.append("T2")
 
-        # T3 or T4 (consume remaining 0.25 at first to hit)
+        # T3 or T4 (0.25 whichever hits first)
         if (not t3_t4_done) and t3_or_t4_left > 0 and remain > 0:
             hit_t3 = (tr.is_long and hi >= tr.t3) or (tr.is_short and lo <= tr.t3)
             hit_t4 = (tr.is_long and hi >= tr.t4) or (tr.is_short and lo <= tr.t4)
             if hit_t3 or hit_t4:
-                lvl = tr.t4 if (hit_t4 and (not hit_t3)) else tr.t3
+                lvl = tr.t4 if (hit_t4 and not hit_t3) else tr.t3
                 realized_R += profit_R(lvl) * t3_or_t4_left
                 remain -= t3_or_t4_left
                 hit_seq.append("T4" if lvl == tr.t4 else "T3")
                 t3_or_t4_left = 0.0
                 t3_t4_done = True
 
-        # 3) Exit early if fully out
         if remain <= 1e-6:
             return {"realized_R": realized_R, "hit_seq": hit_seq, "stop_hit": False, "last_dt": dt}
 
-    # 4) Window ended → mark remaining at last close
-    if remain > 0:
-        last_close = float(df["close"].iloc[-1])
-        realized_R += profit_R(last_close) * remain
-
+    # mark remaining at last close
+    last_close = float(df["close"].iloc[-1])
+    realized_R += profit_R(last_close) * remain
     return {"realized_R": realized_R, "hit_seq": hit_seq, "stop_hit": False, "last_dt": df.index[-1]}
 
 
@@ -290,8 +285,7 @@ async def backtest_once(days: int, tf_min: int, limit: int) -> dict:
     rs = [r for r in results if "realized_R" in r]
     total = len(rs)
     if total == 0:
-        summary = {"trades": 0}
-        return {"count": len(results), "results": results, "summary": summary}
+        return {"count": len(results), "results": results, "summary": {"trades": 0}}
 
     wins = [r for r in rs if r["realized_R"] > 0]
     losses = [r for r in rs if r["realized_R"] < 0]
@@ -399,3 +393,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+PY
