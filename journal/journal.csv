@@ -1,2 +1,2 @@
 timestamp_pt,kind,symbol,direction,entry,stop,t1,t2,t3,t4,score,proj_move_pct,option_type,option_delta,option_expiry,option_strike,option_premium,option_roi_pct,option_dte,option_spread,option_oi,ddoi,opex_week,earnings_soon,earnings_date,earnings_days_to,er_dir,er_conf,gex_peak_strike,gex_peak_side,gex_total
-2025-10-07 14:47:23 PT,entry-test,AAPL,long,185.0,183.5,186.0,187.0,188.5,190.0,95,6.5,,,,,,,,,,,,,,,,,,,
+2025-10-07 15:38:45 PT,entry-test,AAPL,long,185.0,183.5,186.0,187.0,188.5,190.0,95,6.5,,,,,,,,,,,,,,,,,,,
