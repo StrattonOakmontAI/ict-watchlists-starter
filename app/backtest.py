@@ -56,20 +56,87 @@ class Trade:
         return not self.is_long
 
 
+# --- replace the existing _parse_row with this tolerant version ---
 def _parse_row(row: dict) -> Trade | None:
-    """Parse one CSV row into a Trade. Expect timestamp like 'YYYY-mm-dd HH:MM:SS PT'."""
+    """
+    Tolerant CSV row parser:
+      - Accepts header aliases: timestamp_pt|timestamp|time, direction|dir,
+        t1|T1, etc.
+      - Accepts timestamps in:
+          "YYYY-MM-DD HH:MM:SS PT"
+          "YYYY-MM-DD HH:MM PT"
+          ISO-like: "YYYY-MM-DDTHH:MM[:SS][.sss]Z" or with -07:00 offset
+    """
+    def pick(*names, default=None):
+        for n in names:
+            if n in row and row[n] not in (None, ""):
+                return row[n]
+        return default
+
+    ts_raw = (pick("timestamp_pt", "timestamp", "time") or "").strip()
+    sym    = (pick("symbol", "ticker") or "").strip().upper()
+    direction = (pick("direction", "dir") or "").strip().lower()
+    entry  = pick("entry")
+    stop   = pick("stop")
+    t1     = pick("t1", "T1")
+    t2     = pick("t2", "T2")
+    t3     = pick("t3", "T3")
+    t4     = pick("t4", "T4")
+    kind   = (pick("kind", "type", default="entry") or "entry").strip()
+
+    # required fields present?
+    need = [ts_raw, sym, direction, entry, stop, t1, t2, t3, t4]
+    if any(v in (None, "") for v in need):
+        return None
+
+    # parse numbers
     try:
-        ts = datetime.strptime(row["timestamp_pt"], "%Y-%m-%d %H:%M:%S PT").replace(tzinfo=PT)
-        sym = row["symbol"].strip().upper()
-        direction = row.get("direction", "").strip().lower()
-        entry = float(row["entry"]); stop = float(row["stop"])
-        t1 = float(row["t1"]); t2 = float(row["t2"]); t3 = float(row["t3"]); t4 = float(row["t4"])
-        kind = row.get("kind", "entry")
-        tr = Trade(ts=ts, symbol=sym, direction=direction, entry=entry, stop=stop,
-                   t1=t1, t2=t2, t3=t3, t4=t4, kind=kind)
-        return tr if tr.risk_R > 0 else None
+        entry = float(entry); stop = float(stop)
+        t1 = float(t1); t2 = float(t2); t3 = float(t3); t4 = float(t4)
     except Exception:
         return None
+
+    # parse timestamp with a few fallback formats
+    from datetime import timezone
+    PT = settings.tz
+    ts = None
+    fmts = [
+        "%Y-%m-%d %H:%M:%S PT",
+        "%Y-%m-%d %H:%M PT",
+        "%Y-%m-%dT%H:%M:%S%z",
+        "%Y-%m-%dT%H:%M%z",
+        "%Y-%m-%dT%H:%M:%S",
+        "%Y-%m-%dT%H:%M",
+    ]
+    s = ts_raw.replace("  ", " ").strip()
+    for fmt in fmts:
+        try:
+            if fmt.endswith("PT"):
+                # assign PT tzinfo explicitly
+                dt = datetime.strptime(s, fmt)
+                ts = dt.replace(tzinfo=PT)
+            else:
+                dt = datetime.strptime(s, fmt)
+                # if parsed as naive, assume PT; if offset aware, convert to PT
+                ts = dt if dt.tzinfo else dt.replace(tzinfo=PT)
+                if ts.tzinfo != PT:
+                    ts = ts.astimezone(PT)
+            break
+        except Exception:
+            continue
+    if ts is None:
+        # last resort: try simple date only
+        try:
+            dt = datetime.strptime(s[:10], "%Y-%m-%d")
+            ts = dt.replace(hour=6, minute=30, tzinfo=PT)  # 6:30a PT as a default
+        except Exception:
+            return None
+
+    tr = Trade(ts=ts, symbol=sym, direction=direction, entry=entry, stop=stop,
+               t1=t1, t2=t2, t3=t3, t4=t4, kind=kind)
+    return tr if tr.risk_R > 0 else None
+# --- end replacement ---
+
 
 
 def load_trades(limit: int | None = None) -> list[Trade]:
