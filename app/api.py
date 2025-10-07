@@ -1,6 +1,6 @@
+# app/api.py
 from __future__ import annotations
-import os, csv, io
-from typing import List, Dict
+import os
 from fastapi import FastAPI, Response, Request, HTTPException
 from fastapi.responses import PlainTextResponse, HTMLResponse
 from app import journal
@@ -12,7 +12,7 @@ app = FastAPI(title="ICT Watchlists Journal API")
 
 def _auth_ok(req: Request) -> bool:
     if not API_KEY:
-        return True  # open if no key set
+        return True
     return req.headers.get("x-api-key") == API_KEY
 
 @app.get("/health", response_class=PlainTextResponse)
@@ -23,10 +23,14 @@ async def health():
 async def get_csv(request: Request):
     if not _auth_ok(request):
         raise HTTPException(status_code=401, detail="unauthorized")
-    if not os.path.exists(PATH):
+    # prefer local cache
+    if os.path.exists(PATH):
+        with open(PATH, "rb") as f:
+            return Response(content=f.read(), media_type="text/csv")
+    # fallback to GitHub
+    data = journal._remote_download_bytes()
+    if not data:
         raise HTTPException(status_code=404, detail="no journal yet")
-    with open(PATH, "rb") as f:
-        data = f.read()
     return Response(content=data, media_type="text/csv")
 
 @app.get("/journal.json")
