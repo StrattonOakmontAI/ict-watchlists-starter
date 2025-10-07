@@ -261,17 +261,20 @@ async def backtest_once(days: int, tf_min: int, limit: int) -> dict:
 
 
 async def post_summary_to_discord(summary: dict, days: int, tf_min: int, limit: int):
-    hdr = f"Backtest – {summary.get('trades',0)} trades (tf {tf_min}m, {days}d window, cap {limit})"
+    trades = summary.get('trades', 0)
+    hdr = f"Backtest – {trades} trades (tf {tf_min}m, {days}d window, cap {limit})"
+    if trades == 0:
+        await send_watchlist(hdr, ["No trades found in journal.", "Not financial advice"])
+        return
     fields = [
-        f"Win rate: {summary['winrate_pct']}%",
-        f"Avg R / trade: {summary['avg_R']}",
-        f"Expectancy (R): {summary['expectancy_R']}",
-        f"Max drawdown (R): {summary['max_drawdown_R']}",
-        f"W/L/F: {summary['wins']}/{summary['losses']}/{summary['flats']}",
+        f"Win rate: {summary.get('winrate_pct', 0)}%",
+        f"Avg R / trade: {summary.get('avg_R', 0)}",
+        f"Expectancy (R): {summary.get('expectancy_R', 0)}",
+        f"Max drawdown (R): {summary.get('max_drawdown_R', 0)}",
+        f"W/L/F: {summary.get('wins',0)}/{summary.get('losses',0)}/{summary.get('flats',0)}",
         "Not financial advice",
     ]
     await send_watchlist(hdr, fields)
-
 
 def _print_table(rows: list[dict]):
     if not rows:
@@ -314,6 +317,13 @@ def main():
             print("POLYGON_API_KEY missing; set it in DO env and redeploy.")
             sys.exit(2)
         res = asyncio.run(backtest_once(args.days, args.tf, args.limit))
+if res["summary"].get("trades", 0) == 0:
+    print("No trades in journal; skipping Discord post.")
+    if args.post:
+        # still post a simple 'no trades' note
+        asyncio.run(post_summary_to_discord(res["summary"], args.days, args.tf, args.limit))
+    return
+
         print("== Summary ==")
         for k,v in res["summary"].items():
             print(f"{k}: {v}")
