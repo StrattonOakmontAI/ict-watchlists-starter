@@ -1,102 +1,112 @@
 # app/polygon_client.py
-# Minimal, indentation-safe Polygon client used by the MVP.
-# Async httpx + pandas only. No decorators, no fancy retries (kept simple).
+# Minimal async Polygon client used by the watchlist + earnings/GEX features.
 
+from __future__ import annotations
 import os
+from datetime import datetime
+from typing import Any, Dict, List
+
 import httpx
 import pandas as pd
 
-API = "https://api.polygon.io"
-KEY = os.getenv("POLYGON_API_KEY", "")
-
 
 class Polygon:
-    def __init__(self, key: str | None = None):
-        self.key = key or KEY
-        # One async client reused for all calls
-        self._client = httpx.AsyncClient(timeout=30)
+    def __init__(self) -> None:
+        self.key = os.getenv("POLYGON_API_KEY", "").strip()
+        if not self.key:
+            raise RuntimeError("POLYGON_API_KEY is not set")
+        self.x = httpx.AsyncClient(timeout=30)
 
-    async def close(self):
-        try:
-            await self._client.aclose()
-        except Exception:
-            pass
+    # ------------------------- Aggregates (bars) -------------------------
 
     async def aggs(
         self,
         ticker: str,
         multiplier: int,
-        timespan: str,
-        _from: str,
-        _to: str,
+        timespan: str,  # "minute", "hour", "day"
+        from_date: str,  # "YYYY-MM-DD"
+        to_date: str,    # "YYYY-MM-DD"
+        adjusted: bool = True,
+        sort: str = "asc",
         limit: int = 50000,
     ) -> pd.DataFrame:
         """
-        GET /v2/aggs/ticker/{ticker}/range/{multiplier}/{timespan}/{from}/{to}
-        Returns a DataFrame indexed by UTC timestamp with columns:
-        open, high, low, close, volume
+        GET /v2/aggs/ticker/{ticker}/range/{mult}/{timespan}/{from}/{to}
+        Returns a UTC-indexed DataFrame with o/h/l/c/v columns.
         """
-        url = f"{API}/v2/aggs/ticker/{ticker}/range/{multiplier}/{timespan}/{_from}/{_to}"
+        url = f"https://api.polygon.io/v2/aggs/ticker/{ticker.upper()}/range/{multiplier}/{timespan}/{from_date}/{to_date}"
         params = {
-            "adjusted": "true",
-            "sort": "asc",
+            "adjusted": str(adjusted).lower(),
+            "sort": sort,
             "limit": limit,
             "apiKey": self.key,
         }
-        r = await self._client.get(url, params=params)
+        r = await self.x.get(url, params=params)
         r.raise_for_status()
-        js = r.json()
-        rows = js.get("results", [])
-        if not rows:
-            # return an empty, correctly-shaped DataFrame
+        data = r.json()
+        results = data.get("results") or []
+        if not results:
             return pd.DataFrame(
-                columns=["ts", "open", "high", "low", "close", "volume"]
-            ).set_index("ts")
+                [], columns=["open", "high", "low", "close", "volume"]
+            ).set_index(pd.DatetimeIndex([], tz="UTC"))
+        df = pd.DataFrame(results)
+        # Polygon uses ms epoch in "t"
+        idx = pd.to_datetime(df["t"], unit="ms", utc=True)
+        out = pd.DataFrame(
+            {
+                "open": df["o"].astype(float),
+                "high": df["h"].astype(float),
+                "low": df["l"].astype(float),
+                "close": df["c"].astype(float),
+                "volume": df["v"].astype(float),
+            },
+            index=idx,
+        )
+        return out
 
-        df = pd.DataFrame(rows)
-        # Convert ms epoch to UTC tz-aware timestamp
-        df["ts"] = pd.to_datetime(df["t"], unit="ms", utc=True)
-        df = df.rename(
-            columns={"o": "open", "h": "high", "l": "low", "c": "close", "v": "volume"}
-        )[["ts", "open", "high", "low", "close", "volume"]]
-        return df.set_index("ts")
+    # ------------------------- Options snapshots -------------------------
 
-    async def options_chain_snapshot(self, underlying: str, **filters) -> dict:
+    async def options_chain_snapshot(self, ticker: str) -> Dict[str, Any]:
         """
-        GET /v3/snapshot/options/{underlying}
-        Returns raw JSON (or {} on error/plan limitation).
+        GET /v3/snapshot/options/{ticker}
+        Returns JSON list of contracts including quotes/greeks when available.
         """
-        url = f"{API}/v3/snapshot/options/{underlying}"
-        params = {"apiKey": self.key, **filters}
-        r = await self._client.get(url, params=params)
-        if r.status_code >= 400:
-            # Some Polygon plans may not include this endpoint; fail soft.
-            try:
-                r.raise_for_status()
-            finally:
-                return {}
+        url = f"https://api.polygon.io/v3/snapshot/options/{ticker.upper()}"
+        r = await self.x.get(url, params={"limit": 1000, "apiKey": self.key})
+        r.raise_for_status()
+        return r.json()
+
+    # ------------------------- Earnings (next report date) -------------------------
+
+    async def next_earnings_date(self, ticker: str) -> str | None:
+        """
+        GET /v3/reference/earnings?ticker=...&report_date.gte=TODAY&order=asc&sort=report_date&limit=1
+        Returns 'YYYY-MM-DD' or None if no upcoming earnings found.
+        """
         try:
-            return r.json()
+            url = "https://api.polygon.io/v3/reference/earnings"
+            params = {
+                "ticker": ticker.upper(),
+                "order": "asc",
+                "sort": "report_date",
+                "limit": 1,
+                "report_date.gte": datetime.utcnow().date().isoformat(),
+                "apiKey": self.key,
+            }
+            r = await self.x.get(url, params=params)
+            r.raise_for_status()
+            data = r.json()
+            res = data.get("results") or []
+            if not res:
+                return None
+            return res[0].get("report_date")
         except Exception:
-            return {}
+            return None
 
-    async def news(self, ticker: str, limit: int = 20) -> list[dict]:
-        """
-        GET /v2/reference/news?ticker=...
-        """
-        url = f"{API}/v2/reference/news"
-        params = {"apiKey": self.key, "ticker": ticker, "limit": limit, "order": "desc"}
-        r = await self._client.get(url, params=params)
-        if r.status_code >= 400:
-            return []
+    # ------------------------- Lifecycle -------------------------
+
+    async def close(self) -> None:
         try:
-            return r.json().get("results", [])
+            await self.x.aclose()
         except Exception:
-            return []
-
-    async def earnings(self, ticker: str, limit: int = 5) -> list[dict]:
-        """
-        Placeholder for earnings (depends on plan/endpoint availability).
-        Return empty list for MVP; we’ll wire later.
-        """
-        return []
+            pass
