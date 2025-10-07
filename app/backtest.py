@@ -1,11 +1,4 @@
 cat > app/backtest.py <<'PY'
-# app/backtest.py
-# Journal backtester (Polygon)
-# - Auto-fetch /mnt/data/journal.csv from GitHub if missing
-# - Tolerant CSV parser (aliases + multiple timestamp formats)
-# - Simulates T1/T2/T3/T4, stop-first, move-to-BE after T1
-# - Posts compact summary to Discord (reuses send_watchlist)
-
 import os
 import sys
 import csv
@@ -93,7 +86,6 @@ def _parse_row(row: dict) -> Trade | None:
           "YYYY-MM-DD HH:MM PT"
           ISO-like: "YYYY-MM-DDTHH:MM[:SS][.sss][Z|±HH:MM]"
     """
-    # normalize keys: lowercase + strip spaces
     norm = { (k or "").strip().lower(): (v or "").strip() for k,v in row.items() }
 
     def pick(*names, default=None):
@@ -106,22 +98,21 @@ def _parse_row(row: dict) -> Trade | None:
     sym      = (pick("symbol", "ticker") or "").upper()
     direction= pick("direction", "dir") or ""
     entry    = pick("entry"); stop = pick("stop")
-    t1 = pick("t1", "t1 ", "t1\t", "t1\r", "t1\n", "t1.", "t1,","t1;","t1:","t1=","t1-","t1_","t1|","t1\\","t1/","t1?","t1!","t1\"","t1'","t1)", "t1]","t1}>","T1")
-    t2 = pick("t2","T2"); t3 = pick("t3","T3"); t4 = pick("t4","T4")
+    t1 = pick("t1", "T1")
+    t2 = pick("t2", "T2")
+    t3 = pick("t3", "T3")
+    t4 = pick("t4", "T4")
     kind     = pick("kind", "type", default="entry") or "entry"
 
-    # required fields?
     if not all([ts_raw, sym, direction, entry, stop, t1, t2, t3, t4]):
         return None
 
-    # numbers
     try:
         entry = float(entry); stop = float(stop)
         t1 = float(t1); t2 = float(t2); t3 = float(t3); t4 = float(t4)
     except Exception:
         return None
 
-    # timestamp parsing
     s = ts_raw.replace("  ", " ").strip()
     ts = None
     fmts = [
@@ -204,7 +195,8 @@ def simulate_outcome(tr: Trade, df: pd.DataFrame) -> dict:
         return mv / R if R > 0 else 0.0
 
     for dt, row in df.iterrows():
-        hi = float(row["high"]); lo = float(row["low"]); cl = float(row["close"])
+        hi = float(row["high"]); lo = float(row["low"])
+
         # Stop first
         if tr.is_long:
             if lo <= stop_level:
