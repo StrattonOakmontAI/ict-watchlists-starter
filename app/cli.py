@@ -1,73 +1,53 @@
 # app/cli.py
-# Simple CLI + PT scheduler for ICT watchlists (text-only entries inside watchlist.post_watchlist)
-
+from __future__ import annotations
 import os
-import asyncio
 import argparse
+import asyncio
 from datetime import datetime
-import pytz
-from apscheduler.schedulers.asyncio import AsyncIOScheduler
-from apscheduler.triggers.cron import CronTrigger
+from zoneinfo import ZoneInfo
 
 from app.watchlist import post_watchlist
-from app.config import settings
+from app.macro_post import post_macro_update
 
-PT = pytz.timezone("America/Los_Angeles")
+PT = ZoneInfo("America/Los_Angeles")
 
-
-def now_pt_str() -> str:
+def _now_pt_label() -> str:
     return datetime.now(PT).strftime("%Y-%m-%d %H:%M:%S %Z")
 
-
 async def premarket():
-    print(f"[{now_pt_str()}] Running premarket...")
+    print(f"[{_now_pt_label()}] Running premarket...")
+    if os.getenv("MACRO_POST_BEFORE", "0") == "1":
+        await post_macro_update()
     await post_watchlist("premarket")
-    print(f"[{now_pt_str()}] Premarket done.")
-
+    print(f"[{_now_pt_label()}] Premarket done.")
 
 async def evening():
-    print(f"[{now_pt_str()}] Running evening...")
+    print(f"[{_now_pt_label()}] Running evening...")
+    if os.getenv("MACRO_POST_BEFORE", "0") == "1":
+        await post_macro_update()
     await post_watchlist("evening")
-    print(f"[{now_pt_str()}] Evening done.")
-
+    print(f"[{_now_pt_label()}] Evening done.")
 
 async def weekly():
-    print(f"[{now_pt_str()}] Running weekly...")
+    print(f"[{_now_pt_label()}] Running weekly...")
+    if os.getenv("MACRO_POST_BEFORE", "0") == "1":
+        await post_macro_update()
     await post_watchlist("weekly")
-    print(f"[{now_pt_str()}] Weekly done.")
+    print(f"[{_now_pt_label()}] Weekly done.")
 
-
-async def scheduler(startup_log="Starting PT scheduler (weekdays only)..."):
-    """
-    Runs:
-      - Mon–Fri: 06:00 PT premarket, 17:30 PT evening
-      - Sun:     08:00 PT weekly
-    """
-    print(startup_log)
-    sched = AsyncIOScheduler(timezone=PT)
-    sched.add_job(premarket, CronTrigger(day_of_week="mon-fri", hour=6, minute=0))
-    sched.add_job(evening,   CronTrigger(day_of_week="mon-fri", hour=17, minute=30))
-    sched.add_job(weekly,    CronTrigger(day_of_week="sun",     hour=8, minute=0))
-    sched.start()
-    print("Scheduler started (PT). Waiting for triggers...")
-    while True:
-        await asyncio.sleep(3600)
-
+async def macro():
+    print(f"[{_now_pt_label()}] Posting standalone macro update...")
+    await post_macro_update()
+    print(f"[{_now_pt_label()}] Macro update done.")
 
 def main():
-    parser = argparse.ArgumentParser(description="ICT Watchlists CLI")
-    parser.add_argument("cmd", choices=["premarket", "evening", "weekly", "scheduler"], help="Command to run")
+    parser = argparse.ArgumentParser()
+    parser.add_argument("cmd", help="premarket | evening | weekly | macro")
     args = parser.parse_args()
-
-    cmd_map = {
-        "premarket": premarket,
-        "evening": evening,
-        "weekly": weekly,
-        "scheduler": scheduler,
-    }
-
-    asyncio.run(cmd_map[args.cmd]())
-
+    cmd = args.cmd.replace("-", "_")
+    if cmd not in {"premarket", "evening", "weekly", "macro"}:
+        raise SystemExit("unknown command")
+    asyncio.run(globals()[cmd]())
 
 if __name__ == "__main__":
     main()
