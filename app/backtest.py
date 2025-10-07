@@ -1,5 +1,4 @@
-rm -f app/backtest.py
-python - <<'PY'
+
 code = r"""import os
 import sys
 import csv
