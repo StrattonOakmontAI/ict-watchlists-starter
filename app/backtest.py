@@ -1,4 +1,4 @@
-
+python - <<'PY'
 code = r"""import os
 import sys
 import csv
@@ -307,6 +307,7 @@ def main():
 if __name__=="__main__":
     main()
 """
-open("app/backtest.py","w").write(code)
-print("wrote app/backtest.py")
+open("app/backtest.py","w", newline="\n").write(code)
+print("✅ wrote app/backtest.py")
+print("➡️ first line:", open("app/backtest.py").readline().rstrip())
 PY
