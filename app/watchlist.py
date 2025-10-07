@@ -404,7 +404,10 @@ async def post_watchlist(kind: str):
             f"Score {int(r['score'])}{proj}{eflag}"
         )
 
-    fields = [_fmt(r) for r in rows[:20]]
+      fields = [_fmt(r) for r in rows[:20]]
+    if not fields:
+        fields = [f"No Setups (min score {int(MIN_SCORE)}, proj {int(PROJ_MIN*100)}–{int(PROJ_MAX*100)}% over {PROJ_DAYS}d)"]
+
     await send_watchlist(header, fields)
 
     # Also post top 5 entries to 🚨entries
