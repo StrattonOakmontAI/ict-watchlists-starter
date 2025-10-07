@@ -9,25 +9,22 @@ import httpx
 
 PT = ZoneInfo("America/Los_Angeles")
 
-# ===== Env knobs =====
-BLOCK_MIN = int(os.getenv("MACRO_BLOCK_MIN", "30"))
-USE_BLOCK = os.getenv("MACRO_BLOCK_ENABLE", "1") == "1"
+# ===== Env knobs (ICS-only) =====
+BLOCK_MIN   = int(os.getenv("MACRO_BLOCK_MIN", "30"))
+USE_BLOCK   = os.getenv("MACRO_BLOCK_ENABLE", "1") == "1"
 
-# Single url (old), or two dedicated urls, or a comma-separated list.
-ICS_URL = os.getenv("MACRO_ICS_URL", "").strip()
-ICS_URL_BLS = os.getenv("MACRO_ICS_URL_BLS", "").strip()
-ICS_URL_FED = os.getenv("MACRO_ICS_URL_FED", "").strip()
-ICS_URLS = os.getenv("MACRO_ICS_URLS", "").strip()  # comma-separated; optional
+# Supply ONE or more ICS URLs (we’ll merge them). For you: just BLS.
+ICS_URL       = os.getenv("MACRO_ICS_URL", "").strip()
+ICS_URL_BLS   = os.getenv("MACRO_ICS_URL_BLS", "").strip()
+ICS_URLS_LIST = [u.strip() for u in os.getenv("MACRO_ICS_URLS", "").split(",") if u.strip()]
 
-# Keywords to keep (case-insensitive)
+# Keep only macro keywords you care about (BLS covers CPI, PPI, NFP, etc.)
 KEYWORDS = [
-    "CPI", "Consumer Price Index", "Core CPI",
-    "PPI", "Producer Price Index", "Core PPI",
-    "PCE", "Core PCE",
-    "Nonfarm", "NFP", "Employment Situation", "Unemployment Rate",
-    "FOMC", "Fed Interest Rate", "Federal Funds Rate", "Fed Statement",
-    "FOMC Minutes", "Press Conference", "Beige Book",
-    "ISM Services", "ISM Manufacturing",
+    "CPI","Consumer Price Index","Core CPI",
+    "PPI","Producer Price Index","Core PPI",
+    "PCE","Core PCE",
+    "Nonfarm","NFP","Employment Situation","Unemployment Rate",
+    "ISM Services","ISM Manufacturing",
 ]
 KW_RE = re.compile("|".join(re.escape(k) for k in KEYWORDS), re.IGNORECASE)
 
@@ -38,20 +35,25 @@ class MacroEvent:
     start_pt: datetime  # tz-aware PT
 
 
-def _gather_urls() -> List[str]:
+def _gather_ics_urls() -> List[str]:
     urls: List[str] = []
-    for u in (ICS_URL, ICS_URL_BLS, ICS_URL_FED):
+    for u in (ICS_URL, ICS_URL_BLS):
         if u:
             urls.append(u)
-    if ICS_URLS:
-        urls.extend([u.strip() for u in ICS_URLS.split(",") if u.strip()])
+    urls.extend(ICS_URLS_LIST)
     # de-dupe, keep order
     seen, out = set(), []
     for u in urls:
         if u not in seen:
-            out.append(u)
-            seen.add(u)
+            out.append(u); seen.add(u)
     return out
+
+
+async def _fetch_ics(url: str) -> str:
+    async with httpx.AsyncClient(timeout=20) as x:
+        r = await x.get(url)
+        r.raise_for_status()
+        return r.text
 
 
 def _join_folded_ics(lines: List[str]) -> List[str]:
@@ -65,9 +67,7 @@ def _join_folded_ics(lines: List[str]) -> List[str]:
 
 
 def _parse_dt_to_pt(dtstr: str, tzid: Optional[str]) -> Optional[datetime]:
-    # DTSTART variants:
-    #   DTSTART:20251014T123000Z
-    #   DTSTART;TZID=America/New_York:20251014T083000
+    # Handles: DTSTART:20251014T123000Z  |  DTSTART;TZID=America/New_York:20251014T083000
     try:
         if dtstr.endswith("Z"):
             dt = datetime.strptime(dtstr, "%Y%m%dT%H%M%SZ").replace(tzinfo=timezone.utc)
@@ -82,38 +82,26 @@ def _parse_dt_to_pt(dtstr: str, tzid: Optional[str]) -> Optional[datetime]:
         return None
 
 
-async def _fetch_ics(url: str) -> str:
-    async with httpx.AsyncClient(timeout=20) as x:
-        r = await x.get(url)
-        r.raise_for_status()
-        return r.text
-
-
 def _parse_ics_to_events(ics_text: str) -> List[MacroEvent]:
     lines = _join_folded_ics(ics_text.splitlines())
     evs: List[MacroEvent] = []
     in_ev, cur = False, {}
     for ln in lines:
         if ln == "BEGIN:VEVENT":
-            in_ev, cur = True, {}
-            continue
+            in_ev, cur = True, {}; continue
         if ln == "END:VEVENT":
             in_ev = False
             title = cur.get("SUMMARY", "")
-            if not title or not KW_RE.search(title):
-                continue
-            dt = cur.get("DTSTART")
-            tzid = cur.get("DTSTART_TZID")
-            dt_pt = _parse_dt_to_pt(dt, tzid) if dt else None
-            if dt_pt:
-                evs.append(MacroEvent(title=title, start_pt=dt_pt))
-            cur = {}
-            continue
+            if title and KW_RE.search(title):
+                dt = cur.get("DTSTART"); tzid = cur.get("DTSTART_TZID")
+                dt_pt = _parse_dt_to_pt(dt, tzid) if dt else None
+                if dt_pt:
+                    evs.append(MacroEvent(title=title, start_pt=dt_pt))
+            cur = {}; continue
         if not in_ev:
             continue
 
         if ln.startswith("DTSTART;TZID="):
-            # DTSTART;TZID=America/New_York:20251014T083000
             tzid, rest = ln.split(":", 1)
             cur["DTSTART_TZID"] = tzid.split("=", 1)[1]
             cur["DTSTART"] = rest.strip()
@@ -132,8 +120,9 @@ def header_for_events(evs: List[MacroEvent], block_min: int = BLOCK_MIN) -> str:
         s = t.strftime("%-I:%M%p").lower()
         return s.replace(":00", "")  # 5am / 5:30am
     parts = [f"{e.title} @ {fmt(e.start_pt)} PT" for e in sorted(evs, key=lambda x: x.start_pt)[:4]]
-    if len(evs) > 4:
-        parts.append(f"+{len(evs)-4} more")
+    more = len(evs) - 4
+    if more > 0:
+        parts.append(f"+{more} more")
     if USE_BLOCK and block_min > 0:
         return f"Macro: {'; '.join(parts)} (block ±{block_min}m)"
     return f"Macro: {'; '.join(parts)}"
@@ -141,29 +130,26 @@ def header_for_events(evs: List[MacroEvent], block_min: int = BLOCK_MIN) -> str:
 
 async def today_events_pt(now: Optional[datetime] = None) -> Tuple[List[MacroEvent], List[MacroEvent]]:
     """
-    Merge events from multiple ICS feeds (BLS, Fed, or any).
-    Returns (all_today_in_PT, blocking_now) lists.
+    Merge events from provided ICS feeds (e.g., BLS). Returns (today, blocking_now).
     """
     now = now or datetime.now(PT)
-    urls = _gather_urls()
+    urls = _gather_ics_urls()
     if not urls:
         return ([], [])
 
-    # fetch all ICS in parallel
+    # fetch ICS in parallel
     texts: List[str] = []
     async with httpx.AsyncClient(timeout=20) as x:
-        tasks = [x.get(u) for u in urls]
         results = []
-        for t in tasks:
+        for u in urls:
             try:
-                r = await t
-                r.raise_for_status()
+                r = await x.get(u); r.raise_for_status()
                 results.append(r.text)
             except Exception:
                 results.append("")
         texts = results
 
-    # parse & merge
+    # parse & keep only today (PT)
     all_evs: List[MacroEvent] = []
     for txt in texts:
         if not txt:
@@ -173,10 +159,9 @@ async def today_events_pt(now: Optional[datetime] = None) -> Tuple[List[MacroEve
         except Exception:
             pass
 
-    # keep today’s only
     today = [e for e in all_evs if e.start_pt.date() == now.date()]
 
-    # build blocking window
+    # blocking window
     blocking: List[MacroEvent] = []
     if USE_BLOCK and BLOCK_MIN > 0:
         for e in today:
