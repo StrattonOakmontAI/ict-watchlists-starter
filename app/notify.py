@@ -1,12 +1,14 @@
 # app/notify.py
-# Discord webhook helpers for watchlists and entry alerts (env-read + strip at call time)
+# Discord webhook helpers for watchlists and entry alerts (env-read + strip + fallback).
 
+from __future__ import annotations
 import os
 import httpx
 
-# Read once as defaults, but strip, and we'll strip again at call time:
+# Read once as defaults, but strip; we also strip again at call time.
 WL = os.getenv("DISCORD_WEBHOOK_WATCHLIST", "").strip()
 EN = (os.getenv("DISCORD_WEBHOOK_ENTRIES", "") or WL).strip()
+
 
 async def _post(webhook: str, payload: dict) -> None:
     webhook = (webhook or "").strip()  # <- strip every time
@@ -20,6 +22,7 @@ async def _post(webhook: str, payload: dict) -> None:
             print("Sent")
         except httpx.HTTPStatusError as e:
             print("Primary webhook failed:", e)
+            # Fallback to WL if available (avoid losing alerts)
             wl = os.getenv("DISCORD_WEBHOOK_WATCHLIST", WL).strip()
             if webhook != wl and wl:
                 r2 = await x.post(
@@ -35,11 +38,17 @@ async def _post(webhook: str, payload: dict) -> None:
             else:
                 raise
 
+
+# ------------------------- 👀 Watchlist -------------------------
+
 async def send_watchlist(title: str, items: list[str]) -> None:
     fields = [{"name": f"{i+1}.", "value": v, "inline": False} for i, v in enumerate(items)]
     embed = {"title": title, "fields": fields, "footer": {"text": "Not financial advice"}}
     wl = os.getenv("DISCORD_WEBHOOK_WATCHLIST", WL).strip()
     await _post(wl, {"username": "ICT Watchlists 👀", "embeds": [embed]})
+
+
+# ------------------------- 🚨 Entries (detailed) -------------------------
 
 async def send_entry_detail(
     symbol: str,
@@ -60,12 +69,24 @@ async def send_entry_detail(
         f"OPEX {'Yes' if bias.get('opex_week') else 'No'} • "
         f"Earnings {'Soon' if bias.get('earnings_soon') else 'No'}"
     )
+
     fields = [
         {"name": "Entry / Stop / 1R", "value": f"{entry:.2f} / {stop:.2f} / {r_val:.2f}"},
         {"name": "Targets (T1–T4)", "value": f"{t1:.2f} | {t2:.2f} | {t3:.2f} | {t4:.2f}"},
         {"name": "Score", "value": f"{int(score)}"},
         {"name": "Bias", "value": bias_line},
     ]
+
+    # Earnings Read / GEX
+    er_dir = bias.get("er_dir")
+    er_conf = bias.get("er_conf")
+    if er_dir:
+        gpeak = ""
+        if bias.get("gex_peak_strike") is not None and bias.get("gex_peak_side"):
+            gpeak = f" @ {int(round(bias['gex_peak_strike']))}{bias['gex_peak_side'][0].upper()}"
+        fields.insert(1, {"name": "Earnings Read", "value": f"{er_dir} {int(round(100*(er_conf or 0)))}%{gpeak}"})
+
+    # Option line + Projection
     if option:
         opt_txt = (
             f"{option.get('type','?')} Δ{option.get('delta','?')} "
@@ -84,6 +105,9 @@ async def send_entry_detail(
 
     en = (os.getenv("DISCORD_WEBHOOK_ENTRIES", EN) or os.getenv("DISCORD_WEBHOOK_WATCHLIST", WL)).strip()
     await _post(en, {"username": "ICT Entries 🚨", "embeds": [embed]})
+
+
+# ------------------------- Diagnostics -------------------------
 
 def webhooks_diag() -> dict:
     wl_env = os.getenv("DISCORD_WEBHOOK_WATCHLIST", "")
