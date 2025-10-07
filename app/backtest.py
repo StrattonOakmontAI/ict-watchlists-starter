@@ -1,5 +1,4 @@
-python - <<'PY'
-code = r'''
+cat > app/backtest.py <<'PY'
 import os
 import sys
 import csv
@@ -381,7 +380,4 @@ def main():
 
 if __name__ == "__main__":
     main()
-'''
-open('app/backtest.py','w').write(code)
-print("wrote app/backtest.py (bytes):", len(code))
 PY
