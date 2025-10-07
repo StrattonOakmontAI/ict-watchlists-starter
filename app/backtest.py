@@ -1,5 +1,5 @@
-python - <<'PY'
-content = r"""import os
+cat > app/backtest.py <<'PY'
+import os
 import sys
 import csv
 import asyncio
@@ -380,7 +380,4 @@ def main():
 
 if __name__ == "__main__":
     main()
-"""
-open("app/backtest.py","w").write(content)
-print("wrote app/backtest.py")
 PY
