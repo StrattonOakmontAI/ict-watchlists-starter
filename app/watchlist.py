@@ -1,5 +1,5 @@
 # app/watchlist.py
-# Build 👀 watchlists and 🚨 entry alerts using ICT/SMC + TheStrat + earnings/GEX flags.
+# Build 👀 watchlists and 🚨 entry alerts using ICT/SMC + TheStrat + earnings/GEX flags + macro/sector headers + journaling.
 
 from __future__ import annotations
 import os
@@ -24,6 +24,11 @@ from app.detectors.liquidity import equal_highs_lows
 from app.bias.opex import is_opex_week
 from app.bias.ddoi import ddoi_from_chain
 from app.bias.gex import compute_gex, predict_earnings_move
+
+# Macro / Sectors / Journal
+from app.macro import today_events_pt, header_for_events, BLOCK_MIN, USE_BLOCK
+from app.sectors import sectors_header
+from app import journal
 
 # Scoring + notifications
 from app.ranking import score
@@ -63,9 +68,6 @@ GEX_SPREAD_MAX = float(os.getenv("GEX_SPREAD_MAX", "0.20"))
 # ------------------------- Helpers -------------------------
 
 def _targets_from_R(entry: float, stop: float, liq: List[float]) -> List[float]:
-    """
-    Build T1–T4 using nearest liquidity for T1/T2 and pure-R for T3/T4.
-    """
     R = abs(entry - stop)
     direction_up = entry > stop
     r_targets = [entry + (i * R if direction_up else -i * R) for i in (1, 2, 3, 4)]
@@ -80,19 +82,13 @@ def _targets_from_R(entry: float, stop: float, liq: List[float]) -> List[float]:
 
 
 def _projection_pct(df: pd.DataFrame, days: int = PROJ_DAYS) -> float:
-    """
-    Simple slope-based projection over N days (OLS on close).
-    Returns projected % move over the next N days (approximation).
-    """
     import numpy as np
-
     closes = df["close"].dropna().values.astype(float)
     if len(closes) < max(20, days + 5):
         return 0.0
-    y = closes[-(days + 20):]  # use a small history window for slope
+    y = closes[-(days + 20):]
     x = np.arange(len(y), dtype=float)
-    a, b = np.polyfit(x, y, 1)  # y ≈ a*x + b
-    # project N days forward from the last point
+    a, b = np.polyfit(x, y, 1)
     last = y[-1]
     proj = a * (len(y) - 1 + days) + b
     return float((proj / last) - 1.0)
@@ -114,15 +110,10 @@ def _asfloat(x):
 
 
 def _pick_option(chain: dict, spot: float, direction: str) -> dict | None:
-    """
-    Pick a liquid contract near target delta within the DTE window.
-    Returns a dict with {type, delta, expiry, strike, premium, roi_pct, dte, spread}.
-    """
     items = (chain.get("results") or chain.get("options") or [])
     if not isinstance(items, list):
         return None
 
-    # Normalize contracts; Polygon may shape fields slightly differently
     def norm(c: dict) -> dict:
         details = c.get("details", {})
         last_quote = c.get("last_quote", {}) or c.get("quote", {}) or {}
@@ -139,12 +130,10 @@ def _pick_option(chain: dict, spot: float, direction: str) -> dict | None:
             "bid": _asfloat(bid), "ask": _asfloat(ask), "oi": int(oi) if isinstance(oi, (int, float)) else 0
         }
 
-    # Filter by type
     want = "call" if direction == "long" else "put"
     pool = [norm(c) for c in items if isinstance(c, dict)]
     pool = [c for c in pool if c["type"] == want and c["expiry"]]
 
-    # DTE filter
     today = datetime.utcnow().date()
     kept = []
     for c in pool:
@@ -155,7 +144,6 @@ def _pick_option(chain: dict, spot: float, direction: str) -> dict | None:
         if dte < DTE_MIN or dte > DTE_MAX:
             continue
         c["dte"] = dte
-        # liquidity filters
         mid = _mid(c["bid"], c["ask"])
         if mid is None:
             continue
@@ -169,7 +157,6 @@ def _pick_option(chain: dict, spot: float, direction: str) -> dict | None:
     if not kept:
         return None
 
-    # Delta targeting
     lo, hi = DELTA_TARGET - DELTA_BAND, DELTA_TARGET + DELTA_BAND
     cand = [c for c in kept if c["delta"] is not None and lo <= abs(c["delta"]) <= hi]
     if not cand:
@@ -177,10 +164,8 @@ def _pick_option(chain: dict, spot: float, direction: str) -> dict | None:
     if not cand:
         cand = kept
 
-    # Choose the one closest to target delta, then lowest spread
     cand.sort(key=lambda c: (abs((abs(c.get("delta", 0.0)) or 0.0) - DELTA_TARGET), c["spread"], c["dte"]))
     chosen = cand[0]
-
     return {
         "type": chosen["type"].upper(),
         "delta": round(float(abs(chosen.get("delta", 0.0) or 0.0)), 2),
@@ -200,12 +185,6 @@ async def analyze_symbol(
     sym: str,
     tf: Tuple[int, str] = (5, "minute"),
 ) -> dict | None:
-    """
-    Pull data for one symbol, run basic ICT/SMC detectors, compute an entry with T1–T4,
-    estimate projection, pick an option, and enrich with bias (OPEX/DDOI/Earnings/GEX).
-    Return a ranked row or None.
-    """
-    # Pull ~10 calendar days to cover 5+ trading days of 5m bars
     to = datetime.utcnow().date()
     frm = (datetime.utcnow() - timedelta(days=10)).date()
 
@@ -217,19 +196,16 @@ async def analyze_symbol(
     if df.empty or len(df) < 80:
         return None
 
-    # Ensure tz-aware → convert to PT
     if df.index.tz is None:
         df.index = df.index.tz_localize("UTC")
     df = df.tz_convert("America/Los_Angeles")
 
-    # --- ICT/SMC detectors ---
     sw_hi, sw_lo = swings(df, n=3)
     bos_list = bos(df, sw_hi, sw_lo)
     fvg_list = fvgs(df)
     ob_list = order_blocks(df, bos_list)
     eqh, eql = equal_highs_lows(df)
 
-    # Simple directional bias from recent BOS
     long_bias = any(b["dir"] == "bull" for b in bos_list[-3:])
     short_bias = any(b["dir"] == "bear" for b in bos_list[-3:])
 
@@ -257,13 +233,11 @@ async def analyze_symbol(
     if entry is None or stop is None or direction is None:
         return None
 
-    # --- Options chain snapshot (for DDOI/Picker/GEX) ---
     try:
         chain = await p.options_chain_snapshot(sym)
     except Exception:
         chain = {}
 
-    # DDOI + macro bias
     ddoi = ddoi_from_chain(chain)
     bias: Dict[str, Any] = {
         "opex_week": is_opex_week(datetime.utcnow().date()),
@@ -271,7 +245,7 @@ async def analyze_symbol(
         "earnings_soon": False,
     }
 
-    # --- Earnings flag (no blackout) ---
+    # Earnings flag
     try:
         edate = await p.next_earnings_date(sym)
     except Exception:
@@ -281,25 +255,18 @@ async def analyze_symbol(
             ed = datetime.fromisoformat(edate).date()
             days_to = (ed - datetime.utcnow().date()).days
         except Exception:
-            ed = None
-            days_to = None
+            ed, days_to = None, None
         if ed is not None:
             soon = (days_to is not None) and (0 <= days_to <= EARNINGS_FLAG_DAYS)
             bias["earnings_soon"] = soon
             bias["earnings_date"] = ed.isoformat()
             bias["earnings_days_to"] = days_to
 
-    # --- Earnings GEX read if within window ---
+    # Earnings GEX read
     try:
         if bias.get("earnings_soon"):
             spot = float(df["close"].iloc[-1])
-            g = compute_gex(
-                chain=chain,
-                spot=spot,
-                window_pct=GEX_WINDOW_PCT,
-                oi_min=GEX_OI_MIN,
-                spread_max=GEX_SPREAD_MAX,
-            )
+            g = compute_gex(chain=chain, spot=spot, window_pct=GEX_WINDOW_PCT, oi_min=GEX_OI_MIN, spread_max=GEX_SPREAD_MAX)
             pred = predict_earnings_move(g, days_to_earnings=bias.get("earnings_days_to"))
             bias.update({
                 "gex_total": g.get("gex_total"),
@@ -312,29 +279,25 @@ async def analyze_symbol(
     except Exception:
         pass
 
-    # --- Confluence + score ---
     eq_liq = sorted(set(eqh + eql))
     targets = _targets_from_R(entry, stop, eq_liq)
 
     atr_like = float((df["high"] - df["low"]).tail(14).mean())
     conf = {"bos": bool(bos_list), "fvg": bool(fvg_list), "ob": bool(ob_list), "eq_liq": bool(eq_liq)}
-    spread_ok = True  # basic flag; option-level spread handled in picker
+    spread_ok = True
     sc = score(conf, bias, atr_like, spread_ok)
     if sc < MIN_SCORE:
         return None
 
-    # --- Projection (slope-based) filter 5–10% over PROJ_DAYS ---
-    proj = _projection_pct(df, PROJ_DAYS)  # decimal (e.g., 0.07 == 7%)
+    proj = _projection_pct(df, PROJ_DAYS)
     if not (PROJ_MIN <= proj <= PROJ_MAX):
         return None
 
-    # --- Option picker (near-ATM delta) ---
     option = _pick_option(chain, spot=float(df["close"].iloc[-1]), direction=direction)
 
-    # Simple ROI est. to T1
     roi_pct = None
     if option and targets:
-        move = abs(targets[0] - entry)  # to T1
+        move = abs(targets[0] - entry)
         delta = option.get("delta") or 0.35
         prem = option.get("premium") or 1.0
         roi_pct = round(100.0 * (delta * move) / max(prem, 0.01), 1)
@@ -355,10 +318,6 @@ async def analyze_symbol(
 
 
 async def generate(kind: str) -> List[dict]:
-    """
-    Analyze a capped universe with bounded concurrency and return sorted rows.
-    Skips symbols that raise API errors to ensure the job completes.
-    """
     all_syms = load_universe()
     syms = all_syms[:MAX_SYMBOLS]
 
@@ -383,12 +342,20 @@ async def generate(kind: str) -> List[dict]:
 
 
 async def post_watchlist(kind: str):
-    """
-    Post a watchlist to Discord; and send detailed entry alerts for top 5.
-    """
     rows = await generate(kind)
     now_label = datetime.now().strftime("%Y-%m-%d %H:%M PT")
     header = f"{kind.title()} Watchlist – {now_label}"
+
+    # Macro + sectors headers
+    evs, blocking = await today_events_pt()
+    macro_line = header_for_events(evs)
+    sectors_line = ""
+    try:
+        p2 = Polygon()
+        sectors_line = await sectors_header(p2)
+        await p2.close()
+    except Exception:
+        sectors_line = "Sectors: n/a"
 
     def _fmt(r: dict) -> str:
         b = r.get("bias", {})
@@ -405,13 +372,18 @@ async def post_watchlist(kind: str):
             f"Score {int(r['score'])}{proj}{eflag}"
         )
 
-    fields = [_fmt(r) for r in rows[:20]]
-    if not fields:
-        fields = [f"No Setups (min score {int(MIN_SCORE)}, proj {int(PROJ_MIN*100)}–{int(PROJ_MAX*100)}% over {PROJ_DAYS}d)"]
+    body_lines = [_fmt(r) for r in rows[:20]]
+    if not body_lines:
+        body_lines = [f"No Setups (min score {int(MIN_SCORE)}, proj {int(PROJ_MIN*100)}–{int(PROJ_MAX*100)}% over {PROJ_DAYS}d)"]
 
-    await send_watchlist(header, fields)
+    # Send 👀 watchlist with macro & sector lines at the top
+    await send_watchlist(header, [macro_line, sectors_line, *body_lines])
 
-    # Also post top 5 entries to 🚨entries
+    # If macro blocking window active: skip 🚨 entries (safety)
+    if blocking:
+        return
+
+    # Post top 5 entries to 🚨entries and write journal
     for r in rows[:5]:
         await send_entry_detail(
             symbol=r["symbol"],
@@ -424,3 +396,18 @@ async def post_watchlist(kind: str):
             option=r.get("option"),
             proj_move_pct=r.get("proj_move_pct"),
         )
+        # journal row
+        journal.append_entry(journal.build_row(
+            kind="entry",
+            payload={
+                "symbol": r["symbol"],
+                "direction": r["direction"],
+                "entry": float(r["entry"]),
+                "stop": float(r["stop"]),
+                "targets": [float(x) for x in r["targets"]],
+                "score": float(r["score"]),
+                "proj_move_pct": r.get("proj_move_pct"),
+                "option": r.get("option"),
+                "bias": r.get("bias", {}),
+            },
+        ))
