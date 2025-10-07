@@ -80,12 +80,7 @@ class Trade:
 
 def _parse_row(row: dict) -> Trade | None:
     """
-    Tolerant CSV row parser:
-      - Accepts aliases: timestamp_pt|timestamp|time, direction|dir, t1|T1, etc.
-      - Accepts timestamps:
-          "YYYY-MM-DD HH:MM:SS PT"
-          "YYYY-MM-DD HH:MM PT"
-          ISO-like: "YYYY-MM-DDTHH:MM[:SS][.sss][Z|±HH:MM]"
+    Tolerant CSV row parser.
     """
     norm = { (k or "").strip().lower(): (v or "").strip() for k,v in row.items() }
 
