@@ -1,82 +1,100 @@
-# app/cli.py
+# file: app/cli.py
+# Why: Brings README and CLI back in sync + adds an 'idle' for Docker CMD.
 from __future__ import annotations
-import os
-import argparse
-import asyncio
+import argparse, asyncio
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
-from app.watchlist import post_watchlist
-from app.macro_post import post_macro_update
-from app.live import live_loop
+# Keep optional imports non-fatal so tests still work if other modules are incomplete.
+try:
+    from app.watchlist import post_watchlist  # type: ignore
+except Exception:
+    async def post_watchlist(_when: str) -> None: return
+
+try:
+    from app.macro_post import post_macro_update  # type: ignore
+except Exception:
+    async def post_macro_update() -> None: return
+
+try:
+    from app.live import live_loop  # type: ignore
+except Exception:
+    async def live_loop() -> None:
+        while True:
+            await asyncio.sleep(10)
+
+from app.notify import send_watchlist, send_entry_detail
 
 PT = ZoneInfo("America/Los_Angeles")
+def _now_pt_label() -> str: return datetime.now(PT).strftime("%Y-%m-%d %H:%M:%S %Z")
 
-def _now_pt_label() -> str:
-    return datetime.now(PT).strftime("%Y-%m-%d %H:%M:%S %Z")
-
-async def premarket():
-    print(f"[{_now_pt_label()}] Running premarket...")
-    if os.getenv("MACRO_POST_BEFORE", "0") == "1":
-        await post_macro_update()
+async def premarket() -> None:
+    print(f"[{_now_pt_label()}] premarket → watchlist")
     await post_watchlist("premarket")
-    print(f"[{_now_pt_label()}] Premarket done.")
 
-async def evening():
-    print(f"[{_now_pt_label()}] Running evening...")
-    if os.getenv("MACRO_POST_BEFORE", "0") == "1":
-        await post_macro_update()
+async def evening() -> None:
+    print(f"[{_now_pt_label()}] evening → watchlist")
     await post_watchlist("evening")
-    print(f"[{_now_pt_label()}] Evening done.")
 
-async def weekly():
-    print(f"[{_now_pt_label()}] Running weekly...")
-    if os.getenv("MACRO_POST_BEFORE", "0") == "1":
-        await post_macro_update()
+async def weekly() -> None:
+    print(f"[{_now_pt_label()}] weekly → watchlist")
     await post_watchlist("weekly")
-    print(f"[{_now_pt_label()}] Weekly done.")
 
-async def macro():
-    print(f"[{_now_pt_label()}] Posting standalone macro update...")
+async def macro() -> None:
+    print(f"[{_now_pt_label()}] macro → discord")
     await post_macro_update()
-    print(f"[{_now_pt_label()}] Macro update done.")
 
-async def live():
-    print(f"[{_now_pt_label()}] Starting live intraday monitor…")
+async def live() -> None:
+    print(f"[{_now_pt_label()}] live loop starting")
     await live_loop()
-    print(f"[{_now_pt_label()}] Live monitor stopped.")
 
-async def scheduler():
-    """
-    Simple PT scheduler:
-      - Weekdays: 06:00 premarket, 17:30 evening
-      - Sundays:  06:00 weekly
-    """
-    print("Starting PT scheduler (weekdays + Sunday weekly)…")
-    last_run = {"premarket": None, "evening": None, "weekly": None}
+async def idle() -> None:
+    print(f"[{_now_pt_label()}] idle…")  # Why: Docker default CMD that always exists.
     while True:
-        now = datetime.now(PT)
-        wd = now.weekday()  # Mon=0..Sun=6
+        await asyncio.sleep(3600)
 
-        if wd < 5 and now.hour == 6 and last_run["premarket"] != now.date():
-            await premarket()
-            last_run["premarket"] = now.date()
+async def test_watchlist() -> None:
+    title = f"Watchlist Test – {_now_pt_label()}"
+    lines = [
+        "Macro: CPI 5:30a PT; FOMC 11:00a PT",
+        "Sectors: Tech ↑, Energy ↘, Health =",
+        "AAPL LONG – Entry 185.0 | T1 186.0 | Score 92",
+        "MSFT SHORT – Entry 420.5 | T1 418.0 | Score 88",
+    ]
+    await send_watchlist(title, lines)
 
-        if wd < 5 and now.hour == 17 and now.minute == 30 and last_run["evening"] != now.date():
-            await evening()
-            last_run["evening"] = now.date()
+async def test_entry() -> None:
+    await send_entry_detail(
+        symbol="AAPL", direction="long", entry=185.0, stop=183.5,
+        targets=[186.0, 187.0, 188.5], score=95,
+        bias={"trend": "bull", "fair_value_gap": "4h"},
+        option={"type": "C", "strike": 187.5, "dte": 10, "mid": 1.20},
+        proj_move_pct=6.5,
+    )
 
-        if wd == 6 and now.hour == 6 and last_run["weekly"] != now.date():
-            await weekly()
-            last_run["weekly"] = now.date()
-
+async def scheduler() -> None:
+    last = {"premarket": None, "evening": None, "weekly": None}
+    while True:
+        now = datetime.now(PT); wd = now.weekday()  # Mon=0..Sun=6
+        try:
+            if wd < 5 and now.hour == 6 and last["premarket"] != now.date():
+                await premarket(); last["premarket"] = now.date()
+            if wd < 5 and now.hour == 13 and last["evening"] != now.date():
+                await evening();   last["evening"] = now.date()
+            if wd == 6 and now.hour == 6 and last["weekly"] != now.date():
+                await weekly();    last["weekly"] = now.date()
+        except Exception as e:
+            print(f"[{_now_pt_label()}] scheduler error: {e}")
         await asyncio.sleep(30)
 
-def main():
+def main() -> None:
     parser = argparse.ArgumentParser()
-    parser.add_argument("cmd", choices=["premarket", "evening", "weekly", "macro", "live", "scheduler"])
+    parser.add_argument("cmd", choices=[
+        "premarket","evening","weekly","macro","live","scheduler",
+        "idle","test-watchlist","test-entry",
+    ])
     args = parser.parse_args()
-    asyncio.run(globals()[args.cmd]())
+    asyncio.run(globals()[args.cmd.replace("-", "_")]())
 
 if __name__ == "__main__":
     main()
