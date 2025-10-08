@@ -310,5 +310,4 @@ if __name__=="__main__":
     main()
 """
 open('app/backtest.py','w',encoding='utf-8').write(code)
-print("wrote app/backtest.py")
 PY
