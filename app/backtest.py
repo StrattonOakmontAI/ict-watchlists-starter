@@ -1,5 +1,4 @@
-python - <<'PY'
-code = r"""import os
+import os
 import sys
 import csv
 import asyncio
