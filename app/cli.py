@@ -73,19 +73,32 @@ async def test_entry() -> None:
     )
 
 async def scheduler() -> None:
+    from datetime import datetime
+    from app.config import SETTINGS
+    from zoneinfo import ZoneInfo
+
+    PT = ZoneInfo(getattr(SETTINGS, "tz", "America/Los_Angeles"))
     last = {"premarket": None, "evening": None, "weekly": None}
+
     while True:
-        now = datetime.now(PT); wd = now.weekday()  # Mon=0..Sun=6
+        now = datetime.now(PT)
+        wd = now.weekday()  # Mon=0..Sun=6
         try:
-            if wd < 5 and now.hour == 6 and last["premarket"] != now.date():
+            # 06:30 PT on weekdays
+            if wd < 5 and now.hour == 6 and now.minute == 30 and last["premarket"] != now.date():
                 await premarket(); last["premarket"] = now.date()
-            if wd < 5 and now.hour == 13 and last["evening"] != now.date():
+
+            # 13:00 PT on weekdays
+            if wd < 5 and now.hour == 13 and now.minute == 0 and last["evening"] != now.date():
                 await evening();   last["evening"] = now.date()
-            if wd == 6 and now.hour == 6 and last["weekly"] != now.date():
+
+            # Sunday 06:00 PT for weekly
+            if wd == 6 and now.hour == 6 and now.minute == 0 and last["weekly"] != now.date():
                 await weekly();    last["weekly"] = now.date()
         except Exception as e:
-            print(f"[{_now_pt_label()}] scheduler error: {e}")
+            print(f"[{now:%Y-%m-%d %H:%M:%S %Z}] scheduler error: {e}")
         await asyncio.sleep(30)
+)
 
 def main() -> None:
     parser = argparse.ArgumentParser()
