@@ -1,4 +1,8 @@
+python - <<'PY'
+# This script writes a clean Python module to app/backtest.py (no shell junk).
 import os
+
+CONTENT = """import os
 import sys
 import csv
 import asyncio
@@ -33,7 +37,7 @@ def ensure_journal_local() -> bool:
         return False
     try:
         import httpx, base64, pathlib
-        url = f\"https://api.github.com/repos/{repo}/contents/{pth}\"
+        url = f"https://api.github.com/repos/{repo}/contents/{pth}"
         hdr = {'Authorization': f'Bearer {tok}', 'Accept': 'application/vnd.github+json'}
         r = httpx.get(url, headers=hdr, params={'ref': br}, timeout=20)
         r.raise_for_status()
@@ -263,13 +267,13 @@ async def post_summary_to_discord(summary:dict, days:int, tf_min:int, limit:int)
 def _print_table(rows:list[dict]):
     if not rows: print("No rows."); return
     cols=["ts","symbol","direction","entry","stop","R","realized_R","hit_seq","stopped"]
-    print("\t".join(cols))
+    print("\\t".join(cols))
     for r in rows[:100]:
         vals=[]
         for c in cols:
             if c=="hit_seq": vals.append(",".join(r.get("hit_seq",[])))
             else: vals.append(str(r.get(c,"")))
-        print("\t".join(vals))
+        print("\\t".join(vals))
     if len(rows)>100: print(f"... ({len(rows)-100} more)")
 
 
@@ -298,7 +302,7 @@ def main():
         res=asyncio.run(backtest_once(args.days, args.tf, args.limit))
         print("== Summary ==")
         for k,v in res["summary"].items(): print(f"{k}: {v}")
-        print("\n== Sample rows =="); _print_table(res["results"])
+        print("\\n== Sample rows =="); _print_table(res["results"])
         if args.post: asyncio.run(post_summary_to_discord(res["summary"], args.days, args.tf, args.limit))
         return
 
@@ -308,4 +312,8 @@ def main():
 if __name__=="__main__":
     main()
 """
-
+os.makedirs("app", exist_ok=True)
+with open("app/backtest.py","w",encoding="utf-8") as f:
+    f.write(CONTENT)
+print("WROTE app/backtest.py")
+PY
