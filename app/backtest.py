@@ -1,4 +1,3 @@
-rm -f app/backtest.py
 cat > app/backtest.py <<'PY'
 import os
 import sys
