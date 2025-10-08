@@ -1,5 +1,5 @@
-cat > app/backtest.py <<'PY'
-import os
+python - <<'PY'
+code = r"""import os
 import sys
 import csv
 import asyncio
@@ -23,7 +23,7 @@ PT = settings.tz  # America/Los_Angeles tzinfo
 
 
 def ensure_journal_local() -> bool:
-    """If /mnt/data/journal.csv is missing, try to pull it from GitHub env vars."""
+    \"\"\"If /mnt/data/journal.csv is missing, try to pull it from GitHub env vars.\"\"\"
     if os.path.exists(JOURNAL_PATH):
         return True
     repo = os.getenv('GH_REPO')
@@ -34,7 +34,7 @@ def ensure_journal_local() -> bool:
         return False
     try:
         import httpx, base64, pathlib
-        url = f"https://api.github.com/repos/{repo}/contents/{pth}"
+        url = f\"https://api.github.com/repos/{repo}/contents/{pth}\"
         hdr = {'Authorization': f'Bearer {tok}', 'Accept': 'application/vnd.github+json'}
         r = httpx.get(url, headers=hdr, params={'ref': br}, timeout=20)
         r.raise_for_status()
@@ -308,4 +308,7 @@ def main():
 
 if __name__=="__main__":
     main()
+"""
+open('app/backtest.py','w',encoding='utf-8').write(code)
+print("wrote app/backtest.py")
 PY
