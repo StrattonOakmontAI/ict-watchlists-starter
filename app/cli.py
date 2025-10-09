@@ -7,7 +7,21 @@ from datetime import datetime
 from zoneinfo import ZoneInfo
 
 # Ensure .env is loaded locally; on DO, real env vars take precedence.
-import app.env  # noqa: F401
+# file: app/cli.py  (top of file — replace the plain 'import app.env' with guarded import)
+from __future__ import annotations
+import argparse, asyncio
+from datetime import datetime
+from zoneinfo import ZoneInfo
+
+# Load .env if the helper exists; never crash if it's missing.
+try:
+    import app.env  # noqa: F401
+except Exception:
+    pass
+
+from app.notify import send_watchlist, send_entry_detail
+from app.config import SETTINGS
+# ... rest of your cli.py unchanged ...
 
 from app.notify import send_watchlist, send_entry_detail
 from app.config import SETTINGS
