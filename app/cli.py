@@ -1,4 +1,4 @@
-from __future__ import annotations
+rom __future__ import annotations  # must be FIRST and only once
 
 import argparse
 import asyncio
@@ -9,12 +9,12 @@ from pathlib import Path
 from zoneinfo import ZoneInfo
 import logging
 
-# Logging first
+# Structured logging
 from app.logging_setup import setup_logging
 setup_logging()
 log = logging.getLogger("cli")
 
-# Load .env in dev (no-op in DO)
+# Load .env in dev; safe no-op on server
 try:
     import app.env  # noqa: F401
 except Exception:
@@ -23,7 +23,7 @@ except Exception:
 from app.notify import send_watchlist, send_entry_detail
 from app.config import SETTINGS
 
-# Optional imports; keep CLI usable even if feature modules aren't ready yet.
+# Optional imports; keep CLI usable even if these modules aren't ready.
 try:
     from app.watchlist import post_watchlist  # type: ignore
 except Exception:
@@ -50,7 +50,7 @@ def _now_pt_label() -> str:
     return datetime.now(PT).strftime("%Y-%m-%d %H:%M:%S %Z")
 
 def _save_last_run(key: str) -> None:
-    """Record last-run timestamp for a task. Why: /status endpoint."""
+    # Why: expose last runs via the /status endpoint.
     data = {}
     try:
         if LAST_RUNS_PATH.exists():
@@ -71,7 +71,7 @@ def _parse_hhmm(s: str, *, default: str) -> tuple[int, int]:
         raise ValueError("bad HH:MM time")
     return h, m
 
-# ---- Commands ----
+# -------------------- Commands --------------------
 
 async def premarket() -> None:
     log.info("premarket → watchlist")
@@ -164,6 +164,8 @@ async def scheduler() -> None:
             log.error("scheduler error: %s", e)
         await asyncio.sleep(20)  # minute-resolution loop
 
+# -------------------- Entrypoint --------------------
+
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="ict-watchlists")
     p.add_argument(
@@ -182,57 +184,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-
-
-# app/api.py  (/health and /status for a Web Service component)
-from __future__ import annotations
-try:
-    import app.env  # noqa: F401
-except Exception:
-    pass
-
-import json
-import os
-from pathlib import Path
-from typing import Annotated, Dict, Any
-from fastapi import FastAPI, Depends
-from fastapi.responses import PlainTextResponse, JSONResponse
-from app.config import SETTINGS
-
-API = FastAPI(title="ICT Watchlists API")
-
-LAST_RUNS_PATH = Path("/tmp/last_runs.json")  # note: this is container-local
-
-def require_api_key(x_api_key: Annotated[str | None, None] = None):
-    # Keep open by default; wire header check when JOURNAL_API_KEY is set.
-    key = SETTINGS.journal_api_key
-    if not key:
-        return
-    # TODO: enforce x_api_key == key
-
-@API.get("/health", response_class=PlainTextResponse)
-def health() -> str:
-    return "ok"
-
-@API.get("/status", response_class=JSONResponse)
-def status() -> Dict[str, Any]:
-    """Shows TZ, schedule times, and last-run timestamps (if present)."""
-    pre = os.getenv("SCHED_PREMARKET", "06:30")
-    eve = os.getenv("SCHED_EVENING", "13:00")
-    wk  = os.getenv("SCHED_WEEKLY", "06:00")
-    last_runs = {}
-    try:
-        if LAST_RUNS_PATH.exists():
-            last_runs = json.loads(LAST_RUNS_PATH.read_text())
-    except Exception:
-        last_runs = {"_note": "unable to read last-run file"}
-    return {
-        "service": "ict-watchlists",
-        "tz": getattr(SETTINGS, "tz", "America/Los_Angeles"),
-        "schedule": {"premarket": pre, "evening": eve, "weekly": wk},
-        "last_runs": last_runs or {"_note": "no runs recorded yet"},
-        "env": {
-            "DISCORD_WEBHOOK_WATCHLIST_set": bool(SETTINGS.discord_webhook_watchlist),
-            "DISCORD_WEBHOOK_ENTRIES_set": bool(SETTINGS.discord_webhook_entries),
-        },
-    }
