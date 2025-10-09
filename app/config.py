@@ -1,16 +1,28 @@
-# app/config.py  (simple, no external libs; safe indentation)
-
+"""
+Minimal, robust settings (no extra deps). Guarantees `SETTINGS` exists.
+All values come from environment variables. TZ defaults to America/Los_Angeles.
+"""
+from __future__ import annotations
 import os
 
-# Read env vars (with sensible defaults)
-POLYGON_API_KEY = os.getenv("POLYGON_API_KEY", "")
-MIN_SCORE = float(os.getenv("MIN_SCORE", "70"))
-TZ = os.getenv("TZ", "America/Los_Angeles")
-
-# Small holder object so other files can do: from app.config import settings
 class Settings:
-    polygon_key = POLYGON_API_KEY
-    min_score = MIN_SCORE
-    tz = TZ
+    def __init__(self) -> None:
+        # Discord webhooks
+        wl = (os.getenv("DISCORD_WEBHOOK_WATCHLIST", "") or "").strip()
+        en = (os.getenv("DISCORD_WEBHOOK_ENTRIES", "") or "").strip()
+        mc = (os.getenv("DISCORD_WEBHOOK_MACRO", "") or "").strip()
 
-settings = Settings()
+        self.discord_webhook_watchlist = wl
+        # entries falls back to watchlist if empty
+        self.discord_webhook_entries = en or wl
+        # macro falls back to watchlist if empty
+        self.discord_webhook_macro = mc or wl
+
+        # Optional integrations
+        self.journal_api_key = (os.getenv("JOURNAL_API_KEY", "") or "").strip() or None
+        self.polygon_api_key = (os.getenv("POLYGON_API_KEY", "") or "").strip() or None
+
+        # Time zone for scheduler
+        self.tz = os.getenv("TZ", "America/Los_Angeles")
+
+SETTINGS = Settings()  # <-- THIS is what cli.py imports
