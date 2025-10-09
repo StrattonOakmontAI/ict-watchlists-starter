@@ -1,11 +1,12 @@
-from __future__ import annotations  # must be first
+from __future__ import annotations
 
 import argparse
 import asyncio
+import os
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
-# Load .env locally if present; never crash if missing.
+# Load .env for dev; ignore if missing
 try:
     import app.env  # noqa: F401
 except Exception:
@@ -14,7 +15,7 @@ except Exception:
 from app.notify import send_watchlist, send_entry_detail
 from app.config import SETTINGS
 
-# Optional imports; keep CLI usable even if other modules aren't ready yet.
+# Optional imports; keep CLI usable even if feature modules aren't ready.
 try:
     from app.watchlist import post_watchlist  # type: ignore
 except Exception:
@@ -35,24 +36,39 @@ except Exception:
             await asyncio.sleep(10)
 
 PT = ZoneInfo(getattr(SETTINGS, "tz", "America/Los_Angeles"))
-def _now_pt_label() -> str: return datetime.now(PT).strftime("%Y-%m-%d %H:%M:%S %Z")
 
-# -------- commands --------
+def _now_pt_label() -> str:
+    return datetime.now(PT).strftime("%Y-%m-%d %H:%M:%S %Z")
+
+def _parse_hhmm(s: str, *, default: str) -> tuple[int, int]:
+    s = (s or "").strip() or default
+    hh, mm = s.split(":")
+    h, m = int(hh), int(mm)
+    if not (0 <= h <= 23 and 0 <= m <= 59):
+        raise ValueError("bad HH:MM time")
+    return h, m
+
+# ---- Commands ----
+
 async def premarket() -> None:
     print(f"[{_now_pt_label()}] premarket → watchlist")
     await post_watchlist("premarket")
+    print(f"[{_now_pt_label()}] premarket ✓ sent")
 
 async def evening() -> None:
     print(f"[{_now_pt_label()}] evening → watchlist")
     await post_watchlist("evening")
+    print(f"[{_now_pt_label()}] evening ✓ sent")
 
 async def weekly() -> None:
     print(f"[{_now_pt_label()}] weekly → watchlist")
     await post_watchlist("weekly")
+    print(f"[{_now_pt_label()}] weekly ✓ sent")
 
 async def macro() -> None:
     print(f"[{_now_pt_label()}] macro → discord")
     await post_macro_update()
+    print(f"[{_now_pt_label()}] macro ✓ sent")
 
 async def live() -> None:
     print(f"[{_now_pt_label()}] live loop starting")
@@ -89,21 +105,35 @@ async def test_entry() -> None:
     print(f"[{_now_pt_label()}] test-entry ✓ sent")
 
 async def scheduler() -> None:
+    """
+    Fires:
+      - Weekdays: 06:30 PT (premarket), 13:00 PT (evening)
+      - Sundays: 06:00 PT (weekly)
+    Override with env (optional): SCHED_PREMARKET="HH:MM", SCHED_EVENING="HH:MM", SCHED_WEEKLY="HH:MM"
+    """
+    pre_h, pre_m = _parse_hhmm(os.getenv("SCHED_PREMARKET", ""), default="06:30")
+    eve_h, eve_m = _parse_hhmm(os.getenv("SCHED_EVENING", ""), default="13:00")
+    wk_h,  wk_m  = _parse_hhmm(os.getenv("SCHED_WEEKLY",  ""), default="06:00")
+
     last = {"premarket": None, "evening": None, "weekly": None}
+
+    print(f"[{_now_pt_label()}] scheduler start "
+          f"(premarket {pre_h:02d}:{pre_m:02d}, evening {eve_h:02d}:{eve_m:02d}, weekly {wk_h:02d}:{wk_m:02d})")
+
     while True:
-        now = datetime.now(PT); wd = now.weekday()  # Mon=0..Sun=6
+        now = datetime.now(PT)
+        wd = now.weekday()  # Mon=0..Sun=6
         try:
-            if wd < 5 and now.hour == 6 and last["premarket"] != now.date():
+            if wd < 5 and now.hour == pre_h and now.minute == pre_m and last["premarket"] != now.date():
                 await premarket(); last["premarket"] = now.date()
-            if wd < 5 and now.hour == 13 and last["evening"] != now.date():
+            if wd < 5 and now.hour == eve_h and now.minute == eve_m and last["evening"] != now.date():
                 await evening();   last["evening"] = now.date()
-            if wd == 6 and now.hour == 6 and last["weekly"] != now.date():
+            if wd == 6 and now.hour == wk_h and now.minute == wk_m and last["weekly"] != now.date():
                 await weekly();    last["weekly"] = now.date()
         except Exception as e:
             print(f"[{_now_pt_label()}] scheduler error: {e}")
-        await asyncio.sleep(30)
+        await asyncio.sleep(20)  # minute-resolution with fast loop
 
-# -------- entrypoint --------
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="ict-watchlists")
     p.add_argument(
