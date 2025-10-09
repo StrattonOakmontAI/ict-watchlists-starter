@@ -1,5 +1,6 @@
-# file: app/notify.py
-# Why: Robust Discord posting (timeouts + 429 backoff). Safe no-op if env missing.
+"""
+Discord helpers with rate-limit (429) backoff + quick diagnostics.
+"""
 from __future__ import annotations
 import os, asyncio
 from typing import Any, Dict, List, Optional
@@ -12,14 +13,14 @@ _TIMEOUT = httpx.Timeout(10.0, connect=5.0)
 async def _post(webhook: str, payload: Dict[str, Any]) -> None:
     webhook = (webhook or "").strip()
     if not webhook:
-        print("notify: no webhook configured; skipping")  # Why: friendly for first-time setup.
+        print("notify: no webhook configured; skipping")
         return
     async with httpx.AsyncClient(timeout=_TIMEOUT) as x:
         while True:
             r = await x.post(webhook, json=payload)
-            if r.status_code == 204:  # Discord success
+            if r.status_code == 204:
                 return
-            if r.status_code == 429:  # Why: respect rate limits
+            if r.status_code == 429:
                 retry_after = float(r.headers.get("Retry-After", "1"))
                 await asyncio.sleep(retry_after)
                 continue
@@ -76,5 +77,5 @@ def env_diagnostics() -> Dict[str, Any]:
         "WL_default_tail": tail(WL),
         "EN_default_tail": tail(EN),
         "EN_effective_tail": tail(eff_en),
-        "EN_effective_has_space": any(c.isspace() for c in eff_en),  # Why: catches accidental spaces.
+        "EN_effective_has_space": any(c.isspace() for c in eff_en),
     }
