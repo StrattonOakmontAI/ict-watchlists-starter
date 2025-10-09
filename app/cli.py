@@ -1,4 +1,4 @@
-rom __future__ import annotations  # must be FIRST and only once
+from __future__ import annotations  # must be FIRST and only once
 
 import argparse
 import asyncio
@@ -46,8 +46,10 @@ except Exception:
 PT = ZoneInfo(getattr(SETTINGS, "tz", "America/Los_Angeles"))
 LAST_RUNS_PATH = Path("/tmp/last_runs.json")  # container-local only
 
+
 def _now_pt_label() -> str:
     return datetime.now(PT).strftime("%Y-%m-%d %H:%M:%S %Z")
+
 
 def _save_last_run(key: str) -> None:
     # Why: expose last runs via the /status endpoint.
@@ -63,6 +65,7 @@ def _save_last_run(key: str) -> None:
     except Exception as e:
         log.error("writing last-run file failed: %s", e)
 
+
 def _parse_hhmm(s: str, *, default: str) -> tuple[int, int]:
     s = (s or "").strip() or default
     hh, mm = s.split(":")
@@ -70,6 +73,7 @@ def _parse_hhmm(s: str, *, default: str) -> tuple[int, int]:
     if not (0 <= h <= 23 and 0 <= m <= 59):
         raise ValueError("bad HH:MM time")
     return h, m
+
 
 # -------------------- Commands --------------------
 
@@ -79,11 +83,13 @@ async def premarket() -> None:
     _save_last_run("premarket")
     log.info("premarket ✓ sent")
 
+
 async def evening() -> None:
     log.info("evening → watchlist")
     await post_watchlist("evening")
     _save_last_run("evening")
     log.info("evening ✓ sent")
+
 
 async def weekly() -> None:
     log.info("weekly → watchlist")
@@ -91,20 +97,24 @@ async def weekly() -> None:
     _save_last_run("weekly")
     log.info("weekly ✓ sent")
 
+
 async def macro() -> None:
     log.info("macro → discord")
     await post_macro_update()
     _save_last_run("macro")
     log.info("macro ✓ sent")
 
+
 async def live() -> None:
     log.info("live loop starting")
     await live_loop()
+
 
 async def idle() -> None:
     log.info("idle…")
     while True:
         await asyncio.sleep(3600)
+
 
 async def test_watchlist() -> None:
     title = f"Watchlist Test – {_now_pt_label()}"
@@ -117,6 +127,7 @@ async def test_watchlist() -> None:
     await send_watchlist(title, lines)
     _save_last_run("test-watchlist")
     log.info("test-watchlist ✓ sent")
+
 
 async def test_entry() -> None:
     await send_entry_detail(
@@ -133,6 +144,7 @@ async def test_entry() -> None:
     _save_last_run("test-entry")
     log.info("test-entry ✓ sent")
 
+
 async def scheduler() -> None:
     """
     Fires:
@@ -142,7 +154,7 @@ async def scheduler() -> None:
     """
     pre_h, pre_m = _parse_hhmm(os.getenv("SCHED_PREMARKET", ""), default="06:30")
     eve_h, eve_m = _parse_hhmm(os.getenv("SCHED_EVENING", ""), default="13:00")
-    wk_h,  wk_m  = _parse_hhmm(os.getenv("SCHED_WEEKLY",  ""), default="06:00")
+    wk_h, wk_m = _parse_hhmm(os.getenv("SCHED_WEEKLY", ""), default="06:00")
 
     last = {"premarket": None, "evening": None, "weekly": None}
     log.info(
@@ -164,6 +176,7 @@ async def scheduler() -> None:
             log.error("scheduler error: %s", e)
         await asyncio.sleep(20)  # minute-resolution loop
 
+
 # -------------------- Entrypoint --------------------
 
 def build_parser() -> argparse.ArgumentParser:
@@ -171,16 +184,18 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument(
         "cmd",
         choices=[
-            "premarket","evening","weekly","macro","live","scheduler",
-            "idle","test-watchlist","test-entry",
+            "premarket", "evening", "weekly", "macro", "live", "scheduler",
+            "idle", "test-watchlist", "test-entry",
         ],
         help="Command to run",
     )
     return p
 
+
 def main() -> None:
     args = build_parser().parse_args()
     asyncio.run(globals()[args.cmd.replace("-", "_")]())
+
 
 if __name__ == "__main__":
     main()
