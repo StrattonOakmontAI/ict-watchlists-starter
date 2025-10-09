@@ -13,8 +13,16 @@ concurrency:
 jobs:
   build-test:
     runs-on: ubuntu-latest
+    env:
+      PYTHONPATH: ${{ github.workspace }}   # ensure repo root on import path
     steps:
       - uses: actions/checkout@v4
+
+      - name: Show tree (debug)
+        run: |
+          pwd
+          ls -la
+          find . -maxdepth 2 -type d -print
 
       - uses: actions/setup-python@v5
         with:
@@ -31,4 +39,4 @@ jobs:
         run: python -m compileall -q app
 
       - name: Run tests
-        run: pytest -q
+        run: python -m pytest -q
