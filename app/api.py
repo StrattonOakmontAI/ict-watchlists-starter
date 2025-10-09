@@ -1,9 +1,18 @@
-# app/api.py
+# file: app/api.py  (if you import app.env here too, guard it the same way)
 from __future__ import annotations
-import os
-from fastapi import FastAPI, Response, Request, HTTPException
-from fastapi.responses import PlainTextResponse, HTMLResponse
+try:
+    import app.env  # noqa: F401
+except Exception:
+    pass
+
+from typing import Annotated
+from fastapi import FastAPI, Depends
+from fastapi.responses import PlainTextResponse
+from app.config import SETTINGS
 from app import journal
+
+API = FastAPI(title="ICT Watchlists Journal API")
+# ... rest unchanged ...
 
 API_KEY = os.getenv("JOURNAL_API_KEY", "").strip()
 PATH = journal.PATH
