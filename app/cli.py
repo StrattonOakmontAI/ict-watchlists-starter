@@ -1,19 +1,11 @@
-# app/cli.py
-from __future__ import annotations
+from __future__ import annotations  # MUST be first non-comment/non-encoding line
 
 import argparse
 import asyncio
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
-# Ensure .env is loaded locally; on DO, real env vars take precedence.
-# file: app/cli.py  (top of file — replace the plain 'import app.env' with guarded import)
-from __future__ import annotations
-import argparse, asyncio
-from datetime import datetime
-from zoneinfo import ZoneInfo
-
-# Load .env if the helper exists; never crash if it's missing.
+# Load .env locally if present; never crash if missing.
 try:
     import app.env  # noqa: F401
 except Exception:
@@ -21,27 +13,23 @@ except Exception:
 
 from app.notify import send_watchlist, send_entry_detail
 from app.config import SETTINGS
-# ... rest of your cli.py unchanged ...
 
-from app.notify import send_watchlist, send_entry_detail
-from app.config import SETTINGS
-
-# Optional imports; keep CLI usable if feature modules aren't ready.
+# Keep CLI usable even if optional modules aren't wired yet.
 try:
     from app.watchlist import post_watchlist  # type: ignore
-except Exception:  # noqa: BLE001
+except Exception:  # why: allow deploy before watchlist logic exists
     async def post_watchlist(_when: str) -> None:  # type: ignore
         return
 
 try:
     from app.macro_post import post_macro_update  # type: ignore
-except Exception:  # noqa: BLE001
+except Exception:
     async def post_macro_update() -> None:  # type: ignore
         return
 
 try:
     from app.live import live_loop  # type: ignore
-except Exception:  # noqa: BLE001
+except Exception:
     async def live_loop() -> None:  # type: ignore
         while True:
             await asyncio.sleep(10)
@@ -53,7 +41,7 @@ def _now_pt_label() -> str:
     return datetime.now(PT).strftime("%Y-%m-%d %H:%M:%S %Z")
 
 
-# --- Commands ---------------------------------------------------------------
+# -------------------------- commands --------------------------
 
 async def premarket() -> None:
     print(f"[{_now_pt_label()}] premarket → watchlist")
@@ -81,7 +69,7 @@ async def live() -> None:
 
 
 async def idle() -> None:
-    print(f"[{_now_pt_label()}] idle…")  # Why: safe default CMD in Docker/DO.
+    print(f"[{_now_pt_label()}] idle…")  # why: safe default if Worker CMD not overridden
     while True:
         await asyncio.sleep(3600)
 
@@ -115,7 +103,7 @@ async def test_entry() -> None:
 
 async def scheduler() -> None:
     """
-    Simple tick-based scheduler. For production, cron/K8s is preferred.
+    Simple tick-based scheduler; fires once per day per task.
     """
     last = {"premarket": None, "evening": None, "weekly": None}
     while True:
@@ -123,35 +111,26 @@ async def scheduler() -> None:
         wd = now.weekday()  # Mon=0..Sun=6
         try:
             if wd < 5 and now.hour == 6 and last["premarket"] != now.date():
-                await premarket()
-                last["premarket"] = now.date()
+                await premarket(); last["premarket"] = now.date()
             if wd < 5 and now.hour == 13 and last["evening"] != now.date():
-                await evening()
-                last["evening"] = now.date()
+                await evening();   last["evening"] = now.date()
             if wd == 6 and now.hour == 6 and last["weekly"] != now.date():
-                await weekly()
-                last["weekly"] = now.date()
-        except Exception as e:  # Why: never crash the worker; log and continue.
+                await weekly();    last["weekly"] = now.date()
+        except Exception as e:  # why: never crash the worker
             print(f"[{_now_pt_label()}] scheduler error: {e}")
         await asyncio.sleep(30)
 
 
-# --- Entry ------------------------------------------------------------------
+# --------------------------- entrypoint ---------------------------
 
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="ict-watchlists")
     p.add_argument(
         "cmd",
         choices=[
-            "premarket",
-            "evening",
-            "weekly",
-            "macro",
-            "live",
-            "scheduler",
-            "idle",
-            "test-watchlist",
-            "test-entry",
+            "premarket", "evening", "weekly",
+            "macro", "live", "scheduler",
+            "idle", "test-watchlist", "test-entry",
         ],
         help="Command to run",
     )
@@ -159,11 +138,10 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main() -> None:
-    parser = build_parser()
-    args = parser.parse_args()
-    cmd = args.cmd.replace("-", "_")
-    asyncio.run(globals()[cmd]())
+    args = build_parser().parse_args()
+    asyncio.run(globals()[args.cmd.replace("-", "_")]())
 
 
 if __name__ == "__main__":
     main()
+
