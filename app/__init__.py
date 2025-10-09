@@ -1,1 +1,1 @@
-# package
+"""Application package marker."""
