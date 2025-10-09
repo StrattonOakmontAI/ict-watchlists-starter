@@ -1,67 +1,89 @@
-import os, importlib
-import pytest
-import respx
-from httpx import Response
+from __future__ import annotations
+import os, asyncio
+from typing import Any, Dict, List, Optional
+import httpx
 
-@pytest.mark.asyncio
-async def test_send_watchlist_success(monkeypatch):
-    # Set env before import; reload module to pick up env
-    url = "https://discord.com/api/webhooks/TEST/WL"
-    monkeypatch.setenv("DISCORD_WEBHOOK_WATCHLIST", url)
-    monkeypatch.delenv("DISCORD_WEBHOOK_ENTRIES", raising=False)
-    notify = importlib.import_module("app.notify")
-    importlib.reload(notify)
+# Read env once at import time
+WL = os.getenv("DISCORD_WEBHOOK_WATCHLIST", "").strip()
+EN = (os.getenv("DISCORD_WEBHOOK_ENTRIES", "") or WL).strip()
 
-    with respx.mock(base_url="https://discord.com") as router:
-        router.post("/api/webhooks/TEST/WL").mock(return_value=Response(204))
-        await notify.send_watchlist("Title", ["line 1", "line 2"])
+_TIMEOUT = httpx.Timeout(10.0, connect=5.0)
 
-@pytest.mark.asyncio
-async def test_send_entry_rate_limit_then_success(monkeypatch):
-    wl = "https://discord.com/api/webhooks/TEST/WL"
-    en = "https://discord.com/api/webhooks/TEST/EN"
-    monkeypatch.setenv("DISCORD_WEBHOOK_WATCHLIST", wl)
-    monkeypatch.setenv("DISCORD_WEBHOOK_ENTRIES", en)
-    notify = importlib.import_module("app.notify")
-    importlib.reload(notify)
+async def _post(webhook: str, payload: Dict[str, Any]) -> None:
+    """POST to Discord webhook with 429 backoff. Why: respect rate limits."""
+    webhook = (webhook or "").strip()
+    if not webhook:
+        print("notify: no webhook configured; skipping")
+        return
+    async with httpx.AsyncClient(timeout=_TIMEOUT) as x:
+        while True:
+            r = await x.post(webhook, json=payload)
+            if r.status_code == 204:
+                return
+            if r.status_code == 429:
+                retry_after = float(r.headers.get("Retry-After", "1"))
+                await asyncio.sleep(retry_after)
+                continue
+            r.raise_for_status()
 
-    with respx.mock(base_url="https://discord.com") as router:
-        # First 429 with Retry-After: 0; then success 204
-        route = router.post("/api/webhooks/TEST/EN")
-        route.side_effect = [
-            Response(429, headers={"Retry-After": "0"}),
-            Response(204),
-        ]
-        await notify.send_entry_detail(
-            symbol="AAPL", direction="long", entry=1.0, stop=0.5,
-            targets=[1.1, 1.2], score=90,
-        )
+def _lines_to_embed(title: str, lines: List[str]) -> Dict[str, Any]:
+    desc = "\n".join(filter(None, lines))
+    return {"embeds": [{"title": title, "description": desc, "type": "rich"}]}
 
+async def send_watchlist(title: str, lines: List[str], webhook: Optional[str] = None) -> None:
+    payload = {"username": "ICT Watchlist", **_lines_to_embed(title, lines)}
+    await _post(webhook or WL, payload)
 
-# .github/workflows/ci.yml
-name: ci
-on:
-  push:
-    branches: [ "main" ]
-  pull_request:
-    branches: [ "main" ]
-concurrency:
-  group: ci-${{ github.ref }}
-  cancel-in-progress: true
-jobs:
-  build-test:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.12"
-      - name: Install deps
-        run: |
-          python -m pip install -U pip
-          pip install -r requirements.txt
-          pip install pytest pytest-asyncio respx
-      - name: Compile sources
-        run: python -m compileall -q app
-      - name: Run tests
-        run: pytest -q
+async def send_entry_detail(
+    *,
+    symbol: str,
+    direction: str,
+    entry: float,
+    stop: float,
+    targets: List[float],
+    score: float,
+    bias: Dict[str, Any] | None = None,
+    option: Dict[str, Any] | None = None,
+    proj_move_pct: float | None = None,
+    webhook: Optional[str] = None,
+) -> None:
+    fields: List[Dict[str, Any]] = [
+        {"name": "Symbol", "value": symbol, "inline": True},
+        {"name": "Direction", "value": direction.upper(), "inline": True},
+        {"name": "Entry / Stop", "value": f"{entry} / {stop}", "inline": True},
+        {"name": "Targets", "value": " / ".join(str(t) for t in targets[:4]) or "n/a", "inline": False},
+        {"name": "Score", "value": str(int(round(score))), "inline": True},
+    ]
+    if proj_move_pct is not None:
+        fields.append({"name": "Projected Move", "value": f"{proj_move_pct}%", "inline": True})
+    if bias:
+        fields.append({"name": "Bias", "value": ", ".join(f"{k}:{v}" for k, v in bias.items()) or "n/a", "inline": False})
+    if option:
+        opt_txt = ", ".join(f"{k}:{v}" for k, v in option.items())
+        fields.append({"name": "Option", "value": opt_txt or "n/a", "inline": False})
+
+    payload = {
+        "username": "ICT Entry 🚨",
+        "embeds": [{
+            "title": f"{symbol} {direction.upper()}",
+            "type": "rich",
+            "fields": fields,
+            "footer": {"text": "Not financial advice"},
+        }],
+    }
+    await _post(webhook or EN, payload)
+
+def env_diagnostics() -> Dict[str, Any]:
+    """Returns safe tails of env vars to spot whitespace/typos."""
+    wl_env = os.getenv("DISCORD_WEBHOOK_WATCHLIST", "")
+    en_env = os.getenv("DISCORD_WEBHOOK_ENTRIES", "")
+    def tail(u: str) -> str: return "" if not u else u[-40:]
+    eff_en = (en_env or EN).strip()
+    return {
+        "WL_env_tail": tail(wl_env),
+        "EN_env_tail": tail(en_env),
+        "WL_default_tail": tail(WL),
+        "EN_default_tail": tail(EN),
+        "EN_effective_tail": tail(eff_en),
+        "EN_effective_has_space": any(c.isspace() for c in eff_en),
+    }
