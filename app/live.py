@@ -1,4 +1,3 @@
-# app/live.py
 from __future__ import annotations
 
 import os
@@ -7,16 +6,15 @@ from datetime import datetime, time, timedelta
 from zoneinfo import ZoneInfo
 from typing import Dict, Any, List, Tuple, Optional
 
-from app.watchlist import generate  # reuse your ranked analyzer
+from app.watchlist import generate
 from app.polygon_client import Polygon
 from app.notify import send_entry_detail
 
-# ---- Optional deps with safe fallbacks --------------------------------------
+# Optional deps with safe fallbacks
 try:
-    from app.macro import today_events_pt  # expected to return (events, blocking: bool)
+    from app.macro import today_events_pt
 except Exception:
     async def today_events_pt(now: Optional[datetime] = None):
-        # Fallback: never block if macro module not available
         return [], False
 
 try:
@@ -26,54 +24,42 @@ except Exception:
     _JOURNAL_OK = False
     class _J:
         @staticmethod
-        def append_entry(_row):  # no-op
-            pass
+        def append_entry(_row): pass
         @staticmethod
-        def build_row(kind: str, data: dict):
-            return {"kind": kind, **data}
+        def build_row(kind: str, data: dict): return {"kind": kind, **data}
     journal = _J()  # type: ignore
-
 
 PT = ZoneInfo("America/Los_Angeles")
 
-# ---- Tunables via env -------------------------------------------------------
 def _as_int(name: str, default: int) -> int:
-    try:
-        return int(os.getenv(name, str(default)))
-    except Exception:
-        return default
+    try: return int(os.getenv(name, str(default)))
+    except Exception: return default
 
 def _as_float(name: str, default: float) -> float:
-    try:
-        return float(os.getenv(name, str(default)))
-    except Exception:
-        return default
+    try: return float(os.getenv(name, str(default)))
+    except Exception: return default
 
-LIVE_MAX_SYMBOLS = _as_int("LIVE_MAX_SYMBOLS", 20)     # monitor top-N rows
-LIVE_POLL_SEC    = _as_int("LIVE_POLL_SEC", 15)        # polling cadence (sec)
+LIVE_MAX_SYMBOLS = _as_int("LIVE_MAX_SYMBOLS", 20)
+LIVE_POLL_SEC    = _as_int("LIVE_POLL_SEC", 15)
 
-# NOTE: Users often set 0.20 meaning 0.20% (not 20%). Normalize automatically:
-_raw_tol = _as_float("LIVE_TOL_PCT", 0.0005)           # default 0.05% as fraction
-LIVE_TOL_FRAC = _raw_tol / 100.0 if _raw_tol >= 1.0 else _raw_tol  # 0.20 -> 0.002
+# Tolerance: treat >=1 as percent (e.g., 0.20% -> 0.20 -> 0.002)
+_raw_tol = _as_float("LIVE_TOL_PCT", 0.0005)      # default 0.05% as fraction
+LIVE_TOL_FRAC = _raw_tol / 100.0 if _raw_tol >= 1.0 else _raw_tol
 
 LIVE_START_PT = os.getenv("LIVE_START_PT", "06:30")
 LIVE_END_PT   = os.getenv("LIVE_END_PT",   "13:00")
 
+_REGEN_SEC_IF_EMPTY = 120         # how often to retry generate() when empty
+_REGEN_SEC_AFTER_ALL = 300        # cooldown after all symbols triggered
 
-# ---- Helpers ----------------------------------------------------------------
 def _pt(hhmm: str) -> time:
-    hh_str, mm_str = hhmm.split(":")
-    hh, mm = int(hh_str), int(mm_str)
+    hh, mm = [int(x) for x in hhmm.split(":")]
     return time(hh, mm, tzinfo=PT)
 
 def _now_pt() -> datetime:
     return datetime.now(PT)
 
 async def _last_price(p: Polygon, sym: str) -> Optional[float]:
-    """
-    Lightweight last price using recent 1m bars. Uses the latest close available.
-    Pull a 15m window to be robust to minute boundaries.
-    """
     to_dt = datetime.utcnow()
     frm_dt = to_dt - timedelta(minutes=15)
     try:
@@ -92,51 +78,55 @@ def _triggered(price: Optional[float], entry: float, direction: str, tol_frac: f
     else:
         return price <= entry * (1.0 + tol_frac)
 
-async def live_once() -> List[dict]:
-    """
-    Produce the live watch set (top rows) once. Returns the rows list.
-    """
-    rows = await generate("premarket")
-    return rows[:LIVE_MAX_SYMBOLS] if rows else []
+async def _build_watch() -> Dict[str, dict]:
+    rows = await generate("premarket") or []
+    rows = rows[:LIVE_MAX_SYMBOLS]
+    return {r["symbol"]: r for r in rows if "symbol" in r}
 
-# ---- Main loop --------------------------------------------------------------
 async def live_loop():
-    """
-    Weekdays intraday loop:
-      - Skips outside [LIVE_START_PT, LIVE_END_PT) PT
-      - Honors macro blocking window (no entries posted while blocking)
-      - Posts each symbol at most once (first hit)
-    """
+    # validate hours
     try:
         start_t = _pt(LIVE_START_PT)
         end_t   = _pt(LIVE_END_PT)
     except Exception:
         print(f"[{_now_pt().strftime('%H:%M:%S')}] ERROR live: bad LIVE_START_PT/LIVE_END_PT ({LIVE_START_PT=}, {LIVE_END_PT=}); using defaults.")
-        start_t = _pt("06:30")
-        end_t   = _pt("13:00")
+        start_t = _pt("06:30"); end_t = _pt("13:00")
 
-    rows = await live_once()
-    if not rows:
-        print(f"[{_now_pt().strftime('%H:%M:%S')}] INFO live: no rows from generate('premarket'); sleeping.")
-        await asyncio.sleep(max(LIVE_POLL_SEC, 15))
-        return
+    print(f"[{_now_pt().strftime('%H:%M:%S')}] INFO live: loop starting; tol={LIVE_TOL_FRAC:.5f} (raw {_raw_tol}), poll={LIVE_POLL_SEC}s")
 
-    watch: Dict[str, dict] = {r["symbol"]: r for r in rows if "symbol" in r}
-    posted: set[str] = set()
-
-    print(f"[{_now_pt().strftime('%H:%M:%S')}] INFO live: monitor started for {len(watch)} symbols; tol={LIVE_TOL_FRAC:.5f} ({_raw_tol} raw), poll={LIVE_POLL_SEC}s")
     p = Polygon()
+    watch: Dict[str, dict] = {}
+    posted: set[str] = set()
+    last_regen_day: Optional[int] = None
+
     try:
         while True:
             now = _now_pt()
-            wd = now.weekday()  # Mon=0..Sun=6
+            wd = now.weekday()           # Mon=0..Sun=6
             cur = time(now.hour, now.minute, tzinfo=PT)
             in_hours = (wd < 5) and (cur >= start_t) and (cur < end_t)
+
+            # Outside market hours: idle but don't exit
             if not in_hours:
-                await asyncio.sleep(30)
+                posted.clear()
+                watch.clear()
+                last_regen_day = None
+                await asyncio.sleep(60)
                 continue
 
-            # Respect macro block (from BLS ICS)
+            # New day → reset & rebuild
+            if last_regen_day is None or last_regen_day != now.day:
+                posted.clear()
+                watch = await _build_watch()
+                last_regen_day = now.day
+                if not watch:
+                    print(f"[{now.strftime('%H:%M:%S')}] INFO live: no candidates yet; retry in {_REGEN_SEC_IF_EMPTY}s")
+                    await asyncio.sleep(_REGEN_SEC_IF_EMPTY)
+                    continue
+                else:
+                    print(f"[{now.strftime('%H:%M:%S')}] INFO live: tracking {len(watch)} symbols")
+
+            # Macro block window?
             try:
                 _evs, blocking = await today_events_pt(now=now)
             except Exception:
@@ -145,7 +135,7 @@ async def live_loop():
                 await asyncio.sleep(LIVE_POLL_SEC)
                 continue
 
-            # Poll prices and trigger
+            # poll prices
             tasks: List[Tuple[str, asyncio.Task[Optional[float]]]] = []
             for sym, r in watch.items():
                 if sym in posted:
@@ -162,10 +152,9 @@ async def live_loop():
                     targets = [float(x) for x in r.get("targets", [])]
                     score = float(r.get("score", 0))
                 except Exception:
-                    continue  # skip malformed row
+                    continue
 
                 if _triggered(price, entry, direction, LIVE_TOL_FRAC):
-                    # Send entry alert
                     await send_entry_detail(
                         symbol=sym,
                         direction=direction,
@@ -177,7 +166,7 @@ async def live_loop():
                         option=r.get("option"),
                         proj_move_pct=r.get("proj_move_pct"),
                     )
-                    # Journal it (best-effort)
+                    # journal (best-effort)
                     try:
                         row = journal.build_row("entry-live", {
                             "symbol": sym,
@@ -195,10 +184,13 @@ async def live_loop():
                         pass
                     posted.add(sym)
 
-            # Exit early if all have fired
-            if len(posted) == len(watch) and len(watch) > 0:
-                print(f"[{_now_pt().strftime('%H:%M:%S')}] INFO live: finished (all symbols triggered).")
-                return
+            # All fired? Cooldown then refresh list (don’t exit)
+            if watch and len(posted) == len(watch):
+                print(f"[{now.strftime('%H:%M:%S')}] INFO live: all {len(watch)} symbols triggered; cooldown {_REGEN_SEC_AFTER_ALL}s")
+                await asyncio.sleep(_REGEN_SEC_AFTER_ALL)
+                posted.clear()
+                watch = await _build_watch()
+                continue
 
             await asyncio.sleep(LIVE_POLL_SEC)
     finally:
