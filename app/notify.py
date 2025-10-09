@@ -1,6 +1,3 @@
-"""
-Discord helpers with rate-limit (429) backoff + quick diagnostics.
-"""
 from __future__ import annotations
 import os, asyncio
 from typing import Any, Dict, List, Optional
@@ -13,14 +10,14 @@ _TIMEOUT = httpx.Timeout(10.0, connect=5.0)
 async def _post(webhook: str, payload: Dict[str, Any]) -> None:
     webhook = (webhook or "").strip()
     if not webhook:
-        print("notify: no webhook configured; skipping")
+        print("notify: no webhook configured; skipping")  # Why: friendly first-run behavior
         return
     async with httpx.AsyncClient(timeout=_TIMEOUT) as x:
         while True:
             r = await x.post(webhook, json=payload)
             if r.status_code == 204:
                 return
-            if r.status_code == 429:
+            if r.status_code == 429:  # Why: respect rate limits
                 retry_after = float(r.headers.get("Retry-After", "1"))
                 await asyncio.sleep(retry_after)
                 continue
