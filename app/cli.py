@@ -1,4 +1,4 @@
-from __future__ import annotations  # must be FIRST and only once
+from __future__ import annotations  # must be first
 
 import argparse
 import asyncio
@@ -14,34 +14,44 @@ from app.logging_setup import setup_logging
 setup_logging()
 log = logging.getLogger("cli")
 
-# Load .env in dev; safe no-op on server
+# Load .env for local/dev (no-op on DO)
 try:
     import app.env  # noqa: F401
 except Exception:
     pass
 
-from app.notify import send_watchlist, send_entry_detail
-from app.config import SETTINGS
+# ✅ Your config exports `settings` (lowercase)
+try:
+    from app.config import settings as SETTINGS  # alias for uniform usage
+except Exception:
+    # fallback if both exist in future
+    from app.config import SETTINGS  # type: ignore
 
-# Optional imports; keep CLI usable even if these modules aren't ready.
+# Core notifications
+from app.notify import send_watchlist, send_entry_detail
+
+# Optional modules (keep CLI usable if any piece is missing)
 try:
     from app.watchlist import post_watchlist  # type: ignore
 except Exception:
     async def post_watchlist(_when: str) -> None:  # type: ignore
+        log.warning("post_watchlist not available; skipping")
         return
 
 try:
     from app.macro_post import post_macro_update  # type: ignore
 except Exception:
     async def post_macro_update() -> None:  # type: ignore
+        log.warning("post_macro_update not available; skipping")
         return
 
 try:
     from app.live import live_loop  # type: ignore
 except Exception:
     async def live_loop() -> None:  # type: ignore
+        log.warning("live_loop not available; sleeping")
         while True:
-            await asyncio.sleep(10)
+            await asyncio.sleep(30)
 
 PT = ZoneInfo(getattr(SETTINGS, "tz", "America/Los_Angeles"))
 LAST_RUNS_PATH = Path("/tmp/last_runs.json")  # container-local only
@@ -52,7 +62,6 @@ def _now_pt_label() -> str:
 
 
 def _save_last_run(key: str) -> None:
-    # Why: expose last runs via the /status endpoint.
     data = {}
     try:
         if LAST_RUNS_PATH.exists():
@@ -154,7 +163,7 @@ async def scheduler() -> None:
     """
     pre_h, pre_m = _parse_hhmm(os.getenv("SCHED_PREMARKET", ""), default="06:30")
     eve_h, eve_m = _parse_hhmm(os.getenv("SCHED_EVENING", ""), default="13:00")
-    wk_h, wk_m = _parse_hhmm(os.getenv("SCHED_WEEKLY", ""), default="06:00")
+    wk_h,  wk_m  = _parse_hhmm(os.getenv("SCHED_WEEKLY",  ""), default="06:00")
 
     last = {"premarket": None, "evening": None, "weekly": None}
     log.info(
@@ -184,18 +193,16 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument(
         "cmd",
         choices=[
-            "premarket", "evening", "weekly", "macro", "live", "scheduler",
-            "idle", "test-watchlist", "test-entry",
+            "premarket","evening","weekly","macro","live","scheduler",
+            "idle","test-watchlist","test-entry",
         ],
         help="Command to run",
     )
     return p
 
-
 def main() -> None:
     args = build_parser().parse_args()
     asyncio.run(globals()[args.cmd.replace("-", "_")]())
-
 
 if __name__ == "__main__":
     main()
